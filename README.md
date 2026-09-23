@@ -23,6 +23,9 @@ injected by other extensions.
 
 - **Context injections** - explore the hidden parts of the context: the
   system prompt, tool definitions, and extension injections.
+- **Session history and failures** - inspect cumulative provider-reported usage,
+  estimated context categories, tool-source attribution, hard failures, and
+  immediate same-input retries. Estimates are kept separate from provider usage.
 
 ## Commands
 
@@ -30,6 +33,10 @@ injected by other extensions.
 - `/context usage` - open the context usage visualization.
 - `/context injections` - show the hidden parts of the context captured at
   session start or resume.
+- `/context history` - inspect cumulative model usage and estimated context
+  categories for the current Pi session.
+- `/context failures` - inspect hard tool failures and estimated retry/failure
+  overhead.
 - `/context config` - create the global configuration file populated with
   defaults, useful for
   [customization](https://github.com/dimk90/pi-context-view#customization).
@@ -96,7 +103,19 @@ You can configure the number of rows and columns in the `Context Usage` map:
 ![Map size demo](https://media.githubusercontent.com/media/dimk90/pi-context-view/2bc280f758d88fc0ac6396e921c7e697c9016086/doc/images/map-sizes.png)
 
 
-## Context Footprint
+## Accounting and Privacy
+
+`/context history` keeps provider-reported token usage separate from the
+extension's context estimates. `/context failures` reports explicitly flagged
+tool errors and immediately repeated calls with identical tool inputs; those
+costs are estimates and may overlap provider totals.
+
+History is stored as Pi session custom entries containing only timestamps,
+model labels, token counters, and source categories. Prompt text, tool inputs,
+tool outputs, paths, and error text are never persisted by this accounting
+feature. Opening History or Failures does not run the context-capture probe or
+send a model request. See [ARCHITECTURE.md](doc/ARCHITECTURE.md) for the full
+accounting and privacy contract.
 
 `pi-context-view` does not add any instructions or messages to the model context.
 

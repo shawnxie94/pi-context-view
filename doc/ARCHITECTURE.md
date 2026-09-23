@@ -2,7 +2,7 @@
 
 This document describes the current implementation, its limits, and the rules
 that changes must preserve. It covers how pi builds a request, what this
-extension can read, and how that data reaches the two views.
+extension can read, and how that data reaches the views.
 
 ## Views and Data Sources
 
@@ -10,6 +10,8 @@ extension can read, and how that data reaches the two views.
 | ---------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------- |
 | Injections | The captured system prompt, tools, and injected messages.                               | Never after Initial is captured.                          |
 | Usage      | Replayed branch prompt/tools and session messages, plus Initial's request-only changes. | Rebuilt when the view opens; Initial changes stay frozen. |
+| History    | Per-session provider usage, context category estimates, and selected tool-source counts. | Appended after each completed or unpaired model request.  |
+| Failures   | Explicit tool errors, immediate retries, and their token estimates by source.             | Appended when a hard tool error or retry is observed.     |
 
 **Initial** is a frozen snapshot of the system prompt, active tools, and injected messages at the first
 capture after this extension loads. There are two ways to capture it:
@@ -22,6 +24,7 @@ capture after this extension loads. There are two ways to capture it:
   a run with an empty user message so pi and other extensions execute their request-preparation
   handlers. It captures the context from that run, but aborts before a request reaches the model
   provider. This is the [silent probe](#on-demand-silent-probe). It does not generate a model reply.
+  History and Failures read already persisted custom entries only; opening them never starts a probe.
 
 **Request-only messages** are message versions seen during request preparation but not found in the
 saved session context. They may be extra messages added by an extension, or modified versions of
@@ -837,7 +840,23 @@ respectively, before serializing injected-message previews. This includes
 request-only replacements. Do not change the provider-bound message or tool
 arguments, even if an argument has the same name as a signature field.
 
-Persisted probe records contain only role and timestamp identities.
+Persisted probe records contain only role and timestamp identities. History custom entries
+contain only schema version, timestamps, a model label, token counters, and bounded source
+categories. Raw prompts, message bodies, tool arguments, paths, outputs, errors, and retry
+fingerprints are never persisted; retry fingerprints exist only in memory until the next tool
+call or session reset.
+
+Provider usage comes only from assistant messages' Pi-reported usage values. Context category and
+source attribution values use the existing character-based estimate and are cumulative per Pi
+session; source attribution is a subset/overlay and must not be added to category totals. A hard
+tool failure estimate counts transient tool-call argument and error-result text lengths. A retry
+estimate counts the repeated call input only. These estimates can overlap provider-reported usage
+and each other, are not proof of avoidable waste, and must always be labeled as estimates. Only
+`isError` tool results are treated as failures; semantic failures are intentionally not inferred.
+
+The persisted custom type `pi-context-view:history` is a versioned Pi-session interface, not an
+agent-brain SQLite integration. It has no `run_id` association; any future agent-brain run linkage
+must consume a stable metadata contract without reading prompt or tool content.
 
 ## Module Boundaries
 
@@ -854,6 +873,8 @@ Persisted probe records contain only role and timestamp identities.
 | `src/transcript.ts`       | Replay system content, section patches, and tool declarations without provider serialization. |
 | `src/prompt-additions.ts` | Identify prompt additions and make source-attribution guesses.                                |
 | `src/usage.ts`            | Classify messages; build usage totals and previews.                                           |
+| `src/history.ts`          | Capture, validate, persist, and summarize metadata-only session accounting records.           |
+| `src/ui/history-view.ts`  | Render cumulative history and failure/retry accounting.                                      |
 | `src/model.ts`            | Define types, ownership, hierarchy, and grouping.                                             |
 | `src/text.ts`             | Sanitize dynamic text before terminal display.                                                |
 | `src/ui/`                 | Handle navigation, layout, previews, and fullscreen rendering.                                |

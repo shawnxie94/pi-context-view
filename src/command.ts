@@ -16,24 +16,26 @@ import type { InitialSnapshot } from "./model.ts";
 import { runWithProbeToken } from "./probe-token.ts";
 import { normalizePreviewText } from "./text.ts";
 
-const COMMAND_USAGE = "Usage: /context [usage|injections|config]";
+const COMMAND_USAGE = "Usage: /context [usage|injections|history|failures|config]";
 /**
  * Slash-command palette text, kept beside the grammar it describes.
  * RegisteredCommand has no argumentHint; mimic pi's `<hint> — <description>` style.
  */
 export const CONTEXT_COMMAND_DESCRIPTION =
-	"[usage|injections|config] - Inspect context usage, injections";
+	"[usage|injections|history|failures|config] - Inspect context usage, injections, and session accounting";
 /** Cap for reported messages, which may quote configuration files and OS error text. */
 const MAX_REPORTED_MESSAGE_LENGTH = 500;
 const DEFAULT_VIEW: ContextView = "usage";
 const ARGUMENT_OPTIONS = [
 	{ value: "usage", label: "usage", description: "Show estimated context usage" },
 	{ value: "injections", label: "injections", description: "Explore initial context injections" },
+	{ value: "history", label: "history", description: "Show cumulative session usage and source estimates" },
+	{ value: "failures", label: "failures", description: "Show failed tool calls and estimated retry overhead" },
 	{ value: "config", label: "config", description: "Create config file populated with defaults" },
 ] satisfies AutocompleteItem[];
 
 /** The focused view a `/context` invocation requests. */
-export type ContextView = "usage" | "injections";
+export type ContextView = "usage" | "injections" | "history" | "failures";
 
 /** Parsed `/context` argument grammar. */
 export type ContextCommand =
@@ -58,6 +60,12 @@ export function parseContextCommand(argumentsText: string): ContextCommand {
 	}
 	if (words.length === 1 && words[0] === "injections") {
 		return { type: "view", view: "injections" };
+	}
+	if (words.length === 1 && words[0] === "history") {
+		return { type: "view", view: "history" };
+	}
+	if (words.length === 1 && words[0] === "failures") {
+		return { type: "view", view: "failures" };
 	}
 	if (words.length === 1 && words[0] === "config") {
 		return { type: "config" };

@@ -32,24 +32,26 @@ test("parseContextCommand defaults to Usage and accepts the explicit grammar", (
 	assert.deepEqual(parseContextCommand(""), { type: "view", view: "usage" });
 	assert.deepEqual(parseContextCommand(" Usage "), { type: "view", view: "usage" });
 	assert.deepEqual(parseContextCommand("injections"), { type: "view", view: "injections" });
+	assert.deepEqual(parseContextCommand("history"), { type: "view", view: "history" });
+	assert.deepEqual(parseContextCommand("failures"), { type: "view", view: "failures" });
 	assert.deepEqual(parseContextCommand(" CONFIG "), { type: "config" });
 	assert.equal(parseContextCommand("runtime").type, "invalid");
 	assert.equal(parseContextCommand("runtime on").type, "invalid");
 	assert.equal(parseContextCommand("runtime off").type, "invalid");
 	assert.deepEqual(parseContextCommand("usage extra"), {
 		type: "invalid",
-		message: "Usage: /context [usage|injections|config]",
+		message: "Usage: /context [usage|injections|history|failures|config]",
 	});
 });
 
 test("command registration and completions expose the supported grammar", () => {
 	assert.equal(
 		CONTEXT_COMMAND_DESCRIPTION,
-		"[usage|injections|config] - Inspect context usage, injections",
+		"[usage|injections|history|failures|config] - Inspect context usage, injections, and session accounting",
 	);
 	assert.deepEqual(
 		getContextArgumentCompletions("")?.map((item) => item.value),
-		["usage", "injections", "config"],
+		["usage", "injections", "history", "failures", "config"],
 	);
 	assert.deepEqual(
 		getContextArgumentCompletions("inj")?.map((item) => item.value),

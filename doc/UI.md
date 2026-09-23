@@ -1,8 +1,8 @@
 # UI specification
 
-Canonical rendering contract for pi-context-view. Both `/context` views are
-focused fullscreen TUI overlays; Usage and Injections are separate views, with
-no tab state. `/context config` opens no overlay, so it runs in every run mode
+Canonical rendering contract for pi-context-view. The Usage, Injections,
+History, and Failures views are focused fullscreen TUI overlays; they are
+separate views, with no tab state. `/context config` opens no overlay, so it runs in every run mode
 and reports creation, refusal, or failure through a notification, or through
 stderr where no UI is available.
 
@@ -15,6 +15,7 @@ touches:
 | [ui/previews.md](ui/previews.md) | Labeled parts, restored extension lines, marker legend, repeated headings, marked JSON |
 | [ui/usage.md](ui/usage.md) | Context Usage: header, notices, map, map scale, legend, category preview |
 | [ui/injections.md](ui/injections.md) | Context Injections: contribution tree, injection preview |
+| [ui/history.md](ui/history.md) | Context History and Failures: cumulative accounting, estimates, and source rows |
 
 Constants are named where a rule needs a number; the module owning the constant
 is authoritative.
@@ -27,6 +28,7 @@ is authoritative.
 | Usage rendering and interaction | `src/ui/usage-view.ts` |
 | Usage entry and block model | `src/ui/usage-preview.ts` |
 | Injections tree model / rendering | `src/ui/injections-model.ts`, `src/ui/injections-view.ts` |
+| History and failures rendering | `src/ui/history-view.ts` |
 | Labeled parts, preview legend | `src/ui/section-preview.ts` |
 | State markers and legend bullets | `src/ui/markers.ts` |
 | Marked JSON, skill badges, wheel | `src/ui/json-preview.ts`, `src/ui/skill-preview.ts`, `src/ui/wheel.ts` |
