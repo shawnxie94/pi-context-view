@@ -280,7 +280,7 @@ test("UsageView omits cumulative provider and all-source failure totals from Age
 	assert.doesNotMatch(text, /Provider actual|174 requests|Failures & Retries|Hard failures|Same-input retries|Est\. overlap overhead/);
 });
 
-test("UsageView lists every AB invocation separately and previews Bash output collapsed until Enter", () => {
+test("UsageView lists AB invocations and previews Bash output collapsed until Enter", () => {
 	const commandView = createView(createTheme(), { usage: usage(), currentContextSummary: currentContextSummary() }, () => {}, () => 40);
 	commandView.render(130);
 	commandView.handleInput("\u001b[4~"); // Docs.
@@ -292,7 +292,7 @@ test("UsageView lists every AB invocation separately and previews Bash output co
 	assert.match(text, /ab task bind .*≈2k/);
 	assert.doesNotMatch(text, /ab task accept \+ ab task bind|run-123|result line/);
 
-	commandView.handleInput("\r"); // Open the first invocation as a normal Bash block stream.
+	commandView.handleInput("\r"); // Open the command's Bash block stream.
 	text = commandView.render(130).map(stripSgr).join(" ");
 	assert.match(text, /\[bash\]/);
 	assert.match(text, /Command \(ab task accept\):/);

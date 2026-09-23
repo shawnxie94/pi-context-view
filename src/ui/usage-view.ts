@@ -1320,7 +1320,16 @@ function buildCurrentContextRows(
 			expandable: true, expanded: commandsExpanded,
 		});
 		if (commandsExpanded) {
-			rows.push(...commandDetails.map((detail, index) => ({
+			const commandsByLabel = new Map<string, SourceAttributionDetail>();
+			for (const detail of commandDetails) {
+				const existing = commandsByLabel.get(detail.label);
+				commandsByLabel.set(detail.label, existing ? {
+					...existing,
+					tokens: existing.tokens + detail.tokens,
+					executions: [...(existing.executions ?? []), ...(detail.executions ?? [])],
+				} : detail);
+			}
+			rows.push(...[...commandsByLabel.values()].map((detail, index) => ({
 				type: "accounting" as const,
 				id: `ab-command-${index}`,
 				depth: 1,

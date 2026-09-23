@@ -72,9 +72,9 @@ section heading at the same visual level and heading style as `Category:` and
 even though they describe window occupancy rather than composition shares.
 Leave one empty row above the Agent Brain heading. Beneath it, show two
 independently expandable groups: `Commands` and `Docs`. `Commands` expands
-directly into one row per AB invocation, labeled with its safe CLI domain/verb
-(for example `ab task get`); do not add a separate domain row or merge repeated
-commands or multiple AB commands from one Bash call. `Docs` expands into skill
+directly into one row per distinct AB command label, labeled with its safe CLI
+domain/verb (for example `ab task get`); repeated invocations with the same
+label are aggregated into that row. `Docs` expands into skill
 and Agent Brain document reads. Exclude unrelated tools and temporary documents,
 and do not show cumulative provider totals or generation-wide failure/retry
 counts here. The section heading itself is not a selectable data row.
