@@ -116,7 +116,7 @@ export class HistoryView {
 		const border = this.theme.fg("border", "─".repeat(Math.max(1, width)));
 		const title = this.theme.fg("accent", this.theme.bold(this.input.mode === "history" ? "Context History" : "Context Failures"));
 		const descriptionText = this.input.mode === "history"
-			? "Cumulative usage for this Pi session. Provider totals are actual reported values; category and source rows are estimates."
+			? "Cumulative Pi-session usage. Provider fields are reported values; Input + Output Total excludes cache counts; category/source rows are estimates."
 			: "Hard tool failures and same-runtime retries. Their token estimates overlap session totals and are not additional provider usage or proof of avoidable waste.";
 		const description = wrapDescriptionLines(this.theme, descriptionText, "dim", width);
 		const descriptionRows = terminalRows >= 18 ? description : [];
@@ -198,7 +198,7 @@ function buildRows(input: HistoryViewInput): DisplayRow[] {
 		{ label: "Cache Read", value: format(summary.cacheReadTokens) },
 		{ label: "Cache Write", value: format(summary.cacheWriteTokens) },
 		{ label: "Output", value: format(summary.outputTokens) },
-		{ label: "Provider Total", value: format(summary.providerTotalTokens) },
+		{ label: "Input + Output Total", value: format(summary.providerInputOutputTokens) },
 		{ kind: "section", label: "Estimated Context by Category" },
 	];
 	for (const [id, tokens] of Object.entries(summary.estimatedCategories).sort((a, b) => b[1] - a[1])) {

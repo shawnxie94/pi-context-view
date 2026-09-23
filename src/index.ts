@@ -33,12 +33,15 @@ import { showUsageView } from "./ui/usage-view.ts";
 import { computeUsage, toReportedUsage } from "./usage.ts";
 import {
 	attributeVisibleSources,
+	attributeVisibleSourceDetails,
 	recordRequestCompletion,
 	recordToolFailure,
 	recordUnpairedRequest,
 	recordRetry,
+	readCurrentContextRecords,
 	readHistoryRecords,
 	RetryTracker,
+	summarizeCurrentContext,
 	summarizeHistory,
 	type PendingRequest,
 } from "./history.ts";
@@ -84,6 +87,8 @@ export default function (pi: ExtensionAPI) {
 	// Pi ends every observed compaction with exactly one of these two events.
 	pi.on("session_compact", () => {
 		compaction.finish();
+		pendingRequests.length = 0;
+		retryTracker.clear();
 	});
 
 	pi.on("session_compact_failed", () => {
@@ -245,8 +250,9 @@ export default function (pi: ExtensionAPI) {
 			// Loaded only for the Usage view, the sole consumer of configured colors.
 			const loadedConfig = configStore.load();
 			// ReadonlySessionManager lacks buildSessionContext(); use pi's exported builder.
+			const entries = ctx.sessionManager.getEntries();
 			const messages = probe.filterMessages(
-				buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId()).messages,
+				buildSessionContext(entries, ctx.sessionManager.getLeafId()).messages,
 			);
 			const current = buildUsageSnapshot({
 				messages,
@@ -257,6 +263,13 @@ export default function (pi: ExtensionAPI) {
 				activeToolNames: pi.getActiveTools(),
 				promptSources: collectPromptSources(pi.getAllTools(), pi.getCommands()),
 			});
+			const currentContextSummary = summarizeCurrentContext(
+				readCurrentContextRecords(ctx.sessionManager.getBranch()),
+			);
+			const latestRequest = currentContextSummary.latestRequest;
+			const attributedSourceDetails = latestRequest === undefined
+				? []
+				: attributeVisibleSourceDetails(messages, latestRequest.timestamp);
 			await showUsageView(ctx, {
 				usage: computeUsage({
 					snapshot: current,
@@ -265,6 +278,8 @@ export default function (pi: ExtensionAPI) {
 					modelLabel: ctx.model?.id,
 					autoCompactReserveTokens: readAutoCompactReserveTokens(ctx),
 				}),
+				currentContextSummary,
+				attributedSourceDetails,
 				degradedReason: initial.degradedReason,
 				// Reported inside the view: a notification would stay hidden behind the fullscreen overlay.
 				notices: loadedConfig.warnings,

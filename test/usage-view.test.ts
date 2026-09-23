@@ -12,6 +12,7 @@ import {
 	FREE_SPACE_CATEGORY_ID,
 	type MapSize,
 } from "../src/config.ts";
+import type { CurrentContextSummary } from "../src/history.ts";
 import type { ContextUsageSnapshot } from "../src/model.ts";
 import { formatPercent, formatTokens, UsageView, type UsageViewInput } from "../src/ui/usage-view.ts";
 
@@ -116,6 +117,36 @@ function usage(tokens = 43_800): ContextUsageSnapshot {
 	};
 }
 
+/** Session history fixture with actual usage kept separate from estimates. */
+function currentContextSummary(): CurrentContextSummary {
+	return {
+		requests: 14,
+		requestsWithUsage: 13,
+		unknownUsageRequests: 1,
+		inputTokens: 30_000,
+		outputTokens: 4_000,
+		cacheReadTokens: 500,
+		cacheWriteTokens: 0,
+		providerInputOutputTokens: 34_000,
+		estimatedCategories: { skills: 12_000, "tool-output": 13_000 },
+		attributedSources: { "old-cycle-source": 90_000 },
+		failedCalls: 2,
+		retries: 1,
+		estimatedFailureTokens: 820,
+		estimatedRetryTokens: 400,
+		failureSources: { "other-tools": 820 },
+		retrySources: { "temporary-documents": 400 },
+		latestRequest: {
+			schemaVersion: 1, kind: "request", timestamp: 10, model: "p/m",
+			estimatedCategories: {}, attributedSources: {
+				"ab-command-input": 4_000,
+				"agent-brain-docs-output": 1_200,
+				"temporary-documents-input": 90_000,
+			},
+		},
+	};
+}
+
 /** Remove SGR sequences so tests can inspect visual columns. */
 function stripSgr(text: string): string {
 	return text.replace(/\u001b\[[\d;]*m/g, "");
@@ -134,14 +165,174 @@ function createView(
 ): UsageView {
 	const colors = input.categoryColors ?? DEFAULT_CATEGORY_COLORS;
 	const mapSize = input.mapSize ?? DEFAULT_MAP_SIZE;
+	const attributedSourceDetails = input.attributedSourceDetails ?? [
+		{
+			group: "commands" as const,
+			label: "ab task accept",
+			tokens: 2_000,
+			executions: [{
+				toolName: "bash" as const,
+				command: "ab task accept run-123 --project /private/customer",
+				output: Array.from({ length: 24 }, (_, index) => `result line ${index + 1}`).join("\n"),
+				isError: false, timestamp: 1, tokens: 2_000,
+			}],
+		},
+		{
+			group: "commands" as const,
+			label: "ab task bind",
+			tokens: 2_000,
+			executions: [{ toolName: "bash" as const, command: "ab task bind run-123", output: "session bound", isError: false, timestamp: 2, tokens: 2_000 }],
+		},
+		{
+			group: "skills-docs" as const,
+			label: "agent-brain/task-loop.md",
+			tokens: 1_200,
+			executions: [{
+				toolName: "read" as const,
+				path: "/Users/me/.pi/agent/skills/agent-brain/references/task-loop.md",
+				output: Array.from({ length: 24 }, (_, index) => `document line ${index + 1}`).join("\n"),
+				isError: false, timestamp: 3, tokens: 1_200,
+			}],
+		},
+	];
 	return new UsageView(
 		theme,
-		{ ...input, categoryColors: colors, mapSize },
+		{ ...input, attributedSourceDetails, categoryColors: colors, mapSize },
 		done,
 		getTerminalRows,
 		wheelScrollLines,
 	);
 }
+
+test("UsageView shows current-context shares and latest-request AB attribution", () => {
+	const view = createView(createTheme(), {
+		usage: { ...usage(), autoCompactReserveTokens: 16_400 },
+		currentContextSummary: currentContextSummary(),
+	}, () => {}, () => 45);
+	const lines = view.render(130);
+	const plain = lines.map(stripSgr);
+	const text = plain.join(" ");
+
+	assert.match(text, /Category:/);
+	const agentBrainIndex = plain.findIndex((line) => line.trim() === "Agent Brain:");
+	assert.ok(agentBrainIndex >= 0, "Agent Brain has its own peer-level section heading");
+	const bufferIndex = plain.findIndex((line) => line.includes("Auto-Compact Buffer"));
+	const freeSpaceIndex = plain.findIndex((line) => line.includes("Free Space"));
+	assert.ok(bufferIndex >= 0 && freeSpaceIndex >= 0 && bufferIndex < agentBrainIndex && freeSpaceIndex < agentBrainIndex,
+		"window-occupancy rows stay with Category, before Agent Brain");
+	assert.match(text, /Commands .*≈4k/);
+	assert.match(text, /Docs .*≈1\.2k/);
+	assert.doesNotMatch(text, /ab task accept|ab task bind|task-loop\.md/, "specific sources remain drilldown rows");
+	assert.doesNotMatch(text, /Provider actual|Overlapping Views|Failures & Retries|Hard failures|Input \+ Output Total/,
+		"Agent Brain shows only latest-request AB command and skills/docs usage");
+	assert.doesNotMatch(text, /Session History|Context estimate/);
+	assert.match(text, /System Prompt .* 3\.7k\s+8\.4%/);
+	assert.match(text, /Tool Output .* 5k\s+11%/);
+	assert.doesNotMatch(text, /old-cycle-source/, "source attribution comes from the latest request, not a cycle sum");
+	assert.ok(lines.every((line) => visibleWidth(line) <= 130));
+});
+
+test("UsageView separates and indents the Agent Brain section", () => {
+	const compactUsage = { ...usage(), categories: [{ id: "skills", label: "Skills", tokens: 100 }], estimatedTokens: 100 };
+	const view = createView(createTheme(), {
+		usage: compactUsage,
+		currentContextSummary: currentContextSummary(),
+		mapSize: { columns: 0, rows: 1 },
+	}, () => {}, () => 40);
+	let lines = view.render(80).map(stripSgr);
+	const sectionIndex = lines.findIndex((line) => line.trim() === "Agent Brain:");
+	assert.ok(sectionIndex > 0, lines.join("\n"));
+	assert.equal(lines[sectionIndex - 1]?.trim(), "", "leave a blank row above the section title");
+	assert.match(lines.find((line) => line.includes("Commands")) ?? "", /^  ▸ Commands/, lines.join("\n"));
+
+	view.handleInput("\u001b[4~"); // Docs.
+	view.handleInput("\u001b[A"); // Commands.
+	view.handleInput("\r"); // Expand directly into commands: no domain intermediate row.
+	lines = view.render(80).map(stripSgr);
+	const childLine = lines.find((line) => line.includes("ab task accept")) ?? "";
+	assert.ok(childLine.startsWith("→   › ab task accept"), childLine);
+	assert.equal(lines.filter((line) => line.includes("ab task bind")).length, 1, "separate executions keep separate rows");
+});
+
+test("UsageView leaves composition and overlap shares unavailable when the live denominator is zero", () => {
+	const view = createView(createTheme(), {
+		usage: { ...usage(), estimatedTokens: 0 },
+		currentContextSummary: currentContextSummary(),
+	}, () => {}, () => 33);
+	const initial = view.render(130).map(stripSgr);
+	const systemPrompt = initial.find((line) => line.includes("System Prompt")) ?? "";
+	assert.match(systemPrompt, /3\.7k/);
+	assert.doesNotMatch(systemPrompt, /NaN|\d+(?:\.\d+)?%/);
+	view.handleInput("\u001b[4~"); // Docs.
+	view.handleInput("\u001b[A"); // Commands.
+	view.handleInput("\r"); // Expand command group.
+	const source = view.render(180).map(stripSgr).find((line) => line.includes("ab task accept")) ?? "";
+	assert.match(source, /≈2k/);
+	assert.doesNotMatch(source, /NaN|\d+(?:\.\d+)?%/);
+});
+
+test("UsageView omits cumulative provider and all-source failure totals from Agent Brain", () => {
+	const view = createView(createTheme(), {
+		usage: usage(), currentContextSummary: currentContextSummary(),
+	}, () => {}, () => 33);
+	const text = view.render(180).map(stripSgr).join(" ");
+	assert.match(text, /Commands/);
+	assert.doesNotMatch(text, /Provider actual|174 requests|Failures & Retries|Hard failures|Same-input retries|Est\. overlap overhead/);
+});
+
+test("UsageView lists every AB invocation separately and previews Bash output collapsed until Enter", () => {
+	const commandView = createView(createTheme(), { usage: usage(), currentContextSummary: currentContextSummary() }, () => {}, () => 40);
+	commandView.render(130);
+	commandView.handleInput("\u001b[4~"); // Docs.
+	commandView.handleInput("\u001b[A"); // Commands.
+	commandView.handleInput("\r"); // Commands → individual invocations.
+	let text = commandView.render(130).map(stripSgr).join(" ");
+	assert.match(text, /Commands .*≈4k/);
+	assert.match(text, /ab task accept .*≈2k/);
+	assert.match(text, /ab task bind .*≈2k/);
+	assert.doesNotMatch(text, /ab task accept \+ ab task bind|run-123|result line/);
+
+	commandView.handleInput("\r"); // Open the first invocation as a normal Bash block stream.
+	text = commandView.render(130).map(stripSgr).join(" ");
+	assert.match(text, /\[bash\]/);
+	assert.match(text, /Command \(ab task accept\):/);
+	assert.match(text, /result line 1/);
+	assert.match(text, /… \+\d+ lines/);
+	assert.doesNotMatch(text, /result line 24/);
+
+	commandView.handleInput("\r"); // Expand the selected capped Bash block to full content.
+	commandView.handleInput("\u001b[4~"); // Scroll to the execution tail.
+	text = commandView.render(130).map(stripSgr).join(" ");
+	assert.match(text, /ab task accept run-123 --project \/private\/customer/);
+	assert.match(text, /Execution: success/);
+	assert.match(text, /result line 24/);
+	assert.doesNotMatch(text, /… \+\d+ lines/);
+
+	const docsView = createView(createTheme(), { usage: usage(), currentContextSummary: currentContextSummary() }, () => {}, () => 40);
+	docsView.render(180);
+	docsView.handleInput("\u001b[4~"); // Docs.
+	docsView.handleInput("\r"); // Expand to individual document rows.
+	text = docsView.render(180).map(stripSgr).join(" ");
+	assert.match(text, /Docs .*≈1\.2k/);
+	assert.match(text, /agent-brain\/task-loop\.md .*≈1\.2k/);
+	assert.doesNotMatch(text, /task-loop\.md .*\/Users\/me|document line|temporary-documents|old-cycle-source|90k|private/);
+	assert.doesNotMatch(text, /AB source attribution/);
+
+	docsView.handleInput("\r"); // Open the timestamped read block, still capped by default.
+	text = docsView.render(180).map(stripSgr).join(" ");
+	assert.match(text, /\[read\]/);
+	assert.match(text, /Document \(agent-brain\/task-loop\.md\):/);
+	assert.match(text, /Path: \/Users\/me\/\.pi\/agent\/skills\/agent-brain\/references\/task-loop\.md/);
+	assert.match(text, /document line 1/);
+	assert.match(text, /… \+\d+ lines/);
+	assert.doesNotMatch(text, /document line 24/);
+
+	docsView.handleInput("\r"); // Expand the capped read result.
+	docsView.handleInput("\u001b[4~"); // Scroll to the final lines.
+	text = docsView.render(180).map(stripSgr).join(" ");
+	assert.match(text, /document line 24/);
+	assert.doesNotMatch(text, /… \+\d+ lines/);
+});
 
 test("UsageView renders the 16x16 map and matching category legend with semantic colors", () => {
 	// Tall enough for the whole legend to sit beside the map without scrolling.
@@ -169,8 +360,8 @@ test("UsageView renders the 16x16 map and matching category legend with semantic
 	// The block size stays muted at Window scale; only the Fit toggle highlights it.
 	assert.match(lines[mapKeyIndex + 3] ?? "", /\u001b\[38;2;7;8;9m3\.9k \(0\.4%\)/);
 	assert.equal(plain.filter((line) => /^  [■◧▦⛶]( [■◧▦⛶]){15}/.test(line)).length, 16);
-	assert.ok(plain.some((line) => /■ System Prompt \.{2,}\s+3\.7k\s+0\.4%/.test(line)));
-	assert.ok(plain.some((line) => /■ Tool Output \.{2,}\s+5k\s+0\.5%/.test(line)));
+	assert.ok(plain.some((line) => /■ System Prompt \.{2,}\s+3\.7k\s+8\.4%/.test(line)));
+	assert.ok(plain.some((line) => /■ Tool Output \.{2,}\s+5k\s+11%/.test(line)));
 	assert.ok(plain.some((line) => /⛶ Free Space \.{2,}\s+956\.2k\s+96%/.test(line)));
 	const categoryColors: Array<readonly [string, string]> = [
 		["22;23;24", "■"], // System Prompt and Built-in Tools intentionally share one color.
@@ -205,10 +396,10 @@ test("UsageView renders the 16x16 map and matching category legend with semantic
 	assert.equal(new Set(valueColumns).size, 1);
 	// Percentages are matched through their labels: the map key also carries one.
 	const percentColumns = [
-		["System Prompt", "0.4%"],
-		["Built-in Tools", "1.2%"],
-		["Instruction Files", "0.1%"],
-		["Tool Output", "0.5%"],
+		["System Prompt", "8.4%"],
+		["Built-in Tools", "27%"],
+		["Instruction Files", "3.4%"],
+		["Tool Output", "11%"],
 		["Free Space", "96%"],
 	].map(([label, percent]) => {
 		const line = plain.find((candidate) => candidate.includes(label));
@@ -225,7 +416,7 @@ test("UsageView renders the 16x16 map and matching category legend with semantic
 	assert.equal(plain[descriptionIndex]?.indexOf("Estimated context"), 2);
 	assert.match(lines[descriptionIndex] ?? "", /\u001b\[38;2;16;17;18m  Estimated context/);
 	assert.equal(plain[hintsIndex]?.indexOf("↑↓"), 2);
-	assert.match(plain[hintsIndex] ?? "", /↑↓\/jk Navigate · Enter Preview · Z Zoom · Esc Close/);
+	assert.match(plain[hintsIndex] ?? "", /↑↓\/jk Navigate · Enter Open · Z Zoom · Esc Close/);
 	assert.match(lines[hintsIndex] ?? "", /\u001b\[38;2;16;17;18mEsc/);
 	assert.match(lines[hintsIndex] ?? "", /\u001b\[38;2;7;8;9m Close/);
 
@@ -265,7 +456,7 @@ test("UsageView renders a configured map size and clamps it to the viewport", ()
 	const mapLines = widePlain.filter((line) => /^  [■◧▦⛶]{24}\s/.test(line));
 	assert.equal(mapLines.length, 10);
 	assert.ok(
-		widePlain.some((line) => /→ ■ System Prompt \.* 3\.7k\s+0\.4%$/.test(line)),
+		widePlain.some((line) => /→ ■ System Prompt \.* 3\.7k\s+8\.4%$/.test(line)),
 		"the legend keeps whole labels and both value columns",
 	);
 });
@@ -630,7 +821,7 @@ test("UsageView expands only direct Tool Output children and scrolls long tool l
 	};
 	const view = createView(createTheme(), { usage: nestedUsage }, () => {}, () => 24);
 	const initial = view.render(80).map(stripSgr);
-	assert.ok(initial.some((line) => /• tool_1 \.{2,}\s+100\s+0%/.test(line)));
+	assert.ok(initial.some((line) => /• tool_1 \.{2,}\s+100\s+6\.7%/.test(line)));
 	assert.ok(!initial.some((line) => line.includes("tool_15")));
 	assert.ok(!initial.some((line) => line.includes("read should stay collapsed")));
 	assert.ok(!initial.some((line) => line.includes("Tool Results:")));
@@ -643,7 +834,7 @@ test("UsageView expands only direct Tool Output children and scrolls long tool l
 
 	view.handleInput("\u001b[4~"); // End
 	const ending = view.render(80).map(stripSgr);
-	assert.ok(ending.some((line) => /→\s+• tool_15 \.{2,}\s+100\s+0%/.test(line)));
+	assert.ok(ending.some((line) => /→\s+• tool_15 \.{2,}\s+100\s+6\.7%/.test(line)));
 	assert.ok(ending.some((line) => /\(18\/18\)$/.test(line)), "counter reaches the total at the end");
 	assert.ok(ending.some((line) => /⛶ Free Space \.{2,}\s+998\.4k\s+100%/.test(line)));
 	assert.ok(!ending.some((line) => /→\s+⛶ Free Space/.test(line)), "Free Space is never selected");
@@ -697,7 +888,7 @@ test("UsageView opens a category block stream and skips full previews for comple
 	const plain = preview.map((line) => stripSgr(line).trimEnd());
 	assert.equal(plain[2]?.indexOf("Tool Output"), 0);
 	assert.match(preview[2] ?? "", /\u001b\[38;2;1;2;3m.*Tool Output/);
-	assert.match(plain[2] ?? "", /5k · 0\.5%/);
+	assert.match(plain[2] ?? "", /5k · 11%/);
 	assert.doesNotMatch(plain[2] ?? "", /\btokens\b/);
 	assert.equal(preview[3], "");
 

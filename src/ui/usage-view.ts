@@ -15,6 +15,7 @@ import {
 	type MapSize,
 	resolveCategoryColor,
 } from "../config.ts";
+import type { CurrentContextSummary, SourceAttributionDetail } from "../history.ts";
 import type { ContextUsageSnapshot, UsageCategory, UsagePreviewEntry } from "../model.ts";
 import { normalizeInlineText, normalizePreviewText } from "../text.ts";
 import { collectPreviewEntries } from "../usage.ts";
@@ -95,6 +96,10 @@ const MAP_KEY_COMPACT_SPARE_ROWS = 2;
 /** Everything the Usage view renders, classified once when the view opens. */
 export interface UsageViewInput {
 	readonly usage: ContextUsageSnapshot;
+	/** Latest-request source totals used by the Agent Brain section. */
+	readonly currentContextSummary?: CurrentContextSummary;
+	/** Latest-request details; raw command results stay in memory and render only after Enter. */
+	readonly attributedSourceDetails?: readonly SourceAttributionDetail[];
 	readonly degradedReason?: string;
 	/** Non-fatal problems shown under the header, such as ignored configuration entries. */
 	readonly notices?: readonly string[];
@@ -112,6 +117,31 @@ interface CategoryLegendRow {
 	readonly category: UsageCategory;
 	readonly depth: number;
 	readonly rootId: string;
+	readonly parentTokens?: number;
+	/** Keep a single command execution in the ordinary capped Bash block stream. */
+	readonly forceBlockStream?: boolean;
+}
+
+interface SectionSpacerLegendRow {
+	readonly type: "spacer";
+}
+
+interface SectionLegendRow {
+	readonly type: "section";
+	readonly label: string;
+}
+
+interface AccountingLegendRow {
+	readonly type: "accounting";
+	readonly id: string;
+	readonly depth: number;
+	readonly label: string;
+	readonly value: string;
+	readonly percent?: string;
+	readonly expandable?: boolean;
+	readonly expanded?: boolean;
+	readonly previewable?: boolean;
+	readonly detail?: SourceAttributionDetail;
 }
 
 interface BufferLegendRow {
@@ -124,11 +154,11 @@ interface FreeLegendRow {
 	readonly tokens: number;
 }
 
-type LegendRow = CategoryLegendRow | BufferLegendRow | FreeLegendRow;
+type LegendRow = CategoryLegendRow | SectionSpacerLegendRow | SectionLegendRow | AccountingLegendRow | BufferLegendRow | FreeLegendRow;
 
 interface LegendColumns {
 	readonly value: number;
-	readonly tokenWidth: number;
+	readonly valueWidth: number;
 }
 
 /** One navigable preview block: an entry header plus its capped content lines. */
@@ -193,8 +223,9 @@ export class UsageView {
 	private readonly wheelScrollLines: number;
 	private readonly usage: ContextUsageSnapshot;
 	private readonly categoryColors: CategoryColors;
-	private readonly legendRows: readonly LegendRow[];
-	private readonly navigator: ListNavigator;
+	private legendRows: readonly LegendRow[];
+	private navigator: ListNavigator;
+	private readonly expandedAccountingNodes = new Set<string>();
 	private readonly previewScroller = new PreviewScroller();
 	private readonly blockNavigator = new BlockNavigator();
 	private readonly fitMapScale: number | undefined;
@@ -227,9 +258,8 @@ export class UsageView {
 		this.categoryColors = input.categoryColors;
 		this.fitMapScale = calculateFitMapScale(this.usage);
 		this.legendRows = this.buildLegendRows();
-		// The trailing buffer/free block has no preview: it scrolls with the list but is never selectable.
-		const selectableCount = this.legendRows.filter((row) => row.type === "category").length;
-		this.navigator = new ListNavigator(this.legendRows.length, 1, selectableCount);
+		// Section headings and buffer/free rows scroll with the list but cannot be selected.
+		this.navigator = new ListNavigator(this.legendRows.length, 1, this.selectableLegendIndices());
 	}
 
 	/** Handle category navigation, preview opening, and close keys. */
@@ -253,7 +283,10 @@ export class UsageView {
 		if (matchesKey(data, "z")) {
 			this.toggleMapScale();
 		} else if (matchesKey(data, Key.enter)) {
-			this.openPreview();
+			const row = this.legendRows[this.navigator.selected];
+			if (row?.type === "accounting" && row.expandable) this.toggleAccountingNode(row);
+			else if (row?.type === "accounting" && row.previewable) this.openAccountingPreview(row);
+			else this.openPreview();
 		} else if (isStepBackKey(data)) {
 			if (this.navigator.moveBy(-1)) this.clearCache();
 		} else if (isStepForwardKey(data)) {
@@ -267,6 +300,20 @@ export class UsageView {
 		} else if (matchesKey(data, Key.end)) {
 			if (this.navigator.moveTo(this.legendRows.length - 1)) this.clearCache();
 		}
+	}
+
+	/** Expand or collapse one metadata-only session group inside the Category list. */
+	private toggleAccountingNode(row: AccountingLegendRow): void {
+		const selectedIndex = this.navigator.selected;
+		const expanding = !this.expandedAccountingNodes.has(row.id);
+		if (expanding) this.expandedAccountingNodes.add(row.id);
+		else this.expandedAccountingNodes.delete(row.id);
+		const visibleCount = Math.max(1, this.navigator.windowSize);
+		this.legendRows = this.buildLegendRows();
+		const navigator = new ListNavigator(this.legendRows.length, visibleCount, this.selectableLegendIndices());
+		navigator.moveTo(expanding ? selectedIndex + 1 : selectedIndex);
+		this.navigator = navigator;
+		this.clearCache();
 	}
 
 	/** Render a cached fullscreen frame for the current width and terminal height. */
@@ -409,7 +456,7 @@ export class UsageView {
 	private dashboardHints(width: number): Array<readonly [string, string]> {
 		const hints: Array<readonly [string, string]> = [
 			[STEP_KEY_HINT, "Navigate"],
-			["Enter", "Preview"],
+			["Enter", "Open"],
 		];
 		if (this.canToggleMapScale(width)) hints.push(["Z", "Zoom"]);
 		hints.push(["Esc", "Close"]);
@@ -478,7 +525,7 @@ export class UsageView {
 		});
 	}
 
-	/** Category heading, selectable category legend viewport, scroll counter, and map-fill key. */
+	/** Category heading, selectable category/Agent Brain rows, scroll counter, and map-fill key. */
 	private detailLines(width: number, rows: number, map: UsageMap | undefined): string[] {
 		const theme = this.theme;
 		const keyLines = map === undefined ? [] : this.mapKeyLines(map, width, rows);
@@ -497,6 +544,14 @@ export class UsageView {
 			const row = this.legendRows[index];
 			if (row === undefined) break;
 			const selected = index === this.navigator.selected;
+			if (row.type === "spacer") {
+				visibleRows.push("");
+				continue;
+			}
+			if (row.type === "section") {
+				visibleRows.push(this.fit(theme.fg("mdHeading", theme.bold(row.label)), width));
+				continue;
+			}
 			// The cursor stays in one fixed column at the start of the legend.
 			const cursor = selected ? theme.fg("accent", "→ ") : "  ";
 			visibleRows.push(this.fit(`${cursor}${this.legendLine(row, columns, rowWidth, selected)}`, width));
@@ -596,17 +651,28 @@ export class UsageView {
 		return this.theme.fg("text", `${formatTokens(reported.tokens)}/${contextWindow}${percent}`);
 	}
 
-	/**
-	 * All legend rows: top-level categories, Tool Output children, then the
-	 * non-selectable auto-compact buffer and free space.
-	 */
+	/** Category composition and window-occupancy rows precede the peer Agent Brain section. */
 	private buildLegendRows(): LegendRow[] {
 		const rows: LegendRow[] = buildCategoryLegendRows(this.usage.categories);
 		const bufferTokens = this.bufferTokens();
 		if (bufferTokens > 0) rows.push({ type: "buffer", tokens: bufferTokens });
 		const freeTokens = this.freeSpaceTokens();
 		if (freeTokens !== undefined) rows.push({ type: "free", tokens: freeTokens });
+		if (this.input.currentContextSummary !== undefined) {
+			rows.push(...buildCurrentContextRows(
+				this.input.attributedSourceDetails ?? [],
+				this.expandedAccountingNodes,
+				this.usage.estimatedTokens,
+			));
+		}
 		return rows;
+	}
+
+	/** Select data rows while skipping section headings and window-occupancy rows. */
+	private selectableLegendIndices(): number[] {
+		return this.legendRows.flatMap((row, index) =>
+			row.type === "category" || row.type === "accounting" ? [index] : [],
+		);
 	}
 
 	/** Tokens auto-compaction keeps unoccupied; zero when disabled or without a context window. */
@@ -628,30 +694,32 @@ export class UsageView {
 	private legendColumns(width: number): LegendColumns {
 		const rows = this.legendRows;
 		const labelWidth = Math.max(1, ...rows.map((row) => this.plainLegendLabel(row).length));
-		const tokenWidth = Math.max(1, ...rows.map((row) => formatTokens(legendTokens(row)).length));
-		const percentWidth = Math.max(0, ...rows.map((row) => this.plainLegendPercent(legendTokens(row)).length));
-		const rightWidth = tokenWidth + (percentWidth > 0 ? LEGEND_VALUE_GAP + percentWidth : 0);
+		const valueWidth = Math.max(1, ...rows.map((row) => this.plainLegendValue(row).length));
+		const percentWidth = Math.max(0, ...rows.map((row) => this.plainLegendPercent(row).length));
+		const rightWidth = valueWidth + (percentWidth > 0 ? LEGEND_VALUE_GAP + percentWidth : 0);
 		const idealValue = Math.min(MAX_LEGEND_VALUE_COLUMN, labelWidth + LEGEND_LEADER_GAP);
 		return {
 			value: Math.max(1, Math.min(idealValue, width - rightWidth)),
-			tokenWidth,
+			valueWidth,
 		};
 	}
 
 	/** One aligned hierarchy row with dim leaders and independent token/percentage columns. */
 	private legendLine(row: LegendRow, columns: LegendColumns, width: number, selected: boolean): string {
+		if (row.type === "spacer") return "";
+		if (row.type === "section") return this.theme.fg("mdHeading", this.theme.bold(row.label));
 		const labelWidth = Math.max(1, columns.value - 1);
 		const left = fitLine(this.styledLegendLabel(row, selected), labelWidth);
 		const leader = this.legendLeader(columns.value - visibleWidth(left));
-		const tokens = formatTokens(legendTokens(row));
+		const value = row.type === "accounting" ? row.value : formatTokens(legendTokens(row));
 		const valueColor = selected ? "accent" : row.type === "category" && row.depth > 1 ? "dim" : "muted";
-		const tokenPadding = " ".repeat(Math.max(0, columns.tokenWidth - tokens.length));
-		const percent = this.plainLegendPercent(legendTokens(row));
+		const valuePadding = " ".repeat(Math.max(0, columns.valueWidth - value.length));
+		const percent = this.plainLegendPercent(row);
 		const percentPart = percent === ""
 			? ""
 			: `${" ".repeat(LEGEND_VALUE_GAP)}${this.theme.fg(selected ? "accent" : "dim", percent)}`;
 		return fitLine(
-			`${left}${leader}${this.theme.fg(valueColor, tokens)}${tokenPadding}${percentPart}`,
+			`${left}${leader}${this.theme.fg(valueColor, value)}${valuePadding}${percentPart}`,
 			width,
 		);
 	}
@@ -663,15 +731,28 @@ export class UsageView {
 	}
 
 	/** Unstyled hierarchy label used to choose the shared value column. */
+	private plainLegendValue(row: LegendRow): string {
+		if (row.type === "spacer" || row.type === "section") return "";
+		return row.type === "accounting" ? row.value : formatTokens(legendTokens(row));
+	}
+
 	private plainLegendLabel(row: LegendRow): string {
+		if (row.type === "spacer") return "";
+		if (row.type === "section") return row.label;
 		if (row.type === "buffer") return `${BUFFER_CELL} Auto-Compact Buffer`;
 		if (row.type === "free") return `${FREE_CELL} Free Space`;
+		if (row.type === "accounting") {
+			const marker = row.expandable ? (row.expanded ? "▾" : "▸") : row.previewable ? "›" : BREAKDOWN_MARKER;
+			return `${"  ".repeat(row.depth)}${marker} ${normalizeInlineText(row.label)}`;
+		}
 		const indent = "  ".repeat(row.depth);
 		return `${indent}${categoryMarker(row.category.id, row.depth)} ${normalizeInlineText(row.category.label)}`;
 	}
 
 	/** Themed hierarchy label; the marker keeps its map color even when selected. */
 	private styledLegendLabel(row: LegendRow, selected: boolean): string {
+		if (row.type === "spacer") return "";
+		if (row.type === "section") return this.theme.fg("mdHeading", this.theme.bold(row.label));
 		if (row.type === "buffer") {
 			const color = this.categoryColor(AUTO_COMPACT_BUFFER_CATEGORY_ID);
 			return `${this.paint(color, BUFFER_CELL)} ${this.theme.fg("text", "Auto-Compact Buffer")}`;
@@ -679,6 +760,13 @@ export class UsageView {
 		if (row.type === "free") {
 			const color = this.categoryColor(FREE_SPACE_CATEGORY_ID);
 			return `${this.paint(color, FREE_CELL)} ${this.theme.fg(selected ? "accent" : "text", "Free Space")}`;
+		}
+		if (row.type === "accounting") {
+			const indent = "  ".repeat(row.depth);
+			const marker = row.expandable ? (row.expanded ? "▾" : "▸") : row.previewable ? "›" : BREAKDOWN_MARKER;
+			const markerColor = selected ? "accent" : row.expandable || row.previewable ? "mdHeading" : "dim";
+			const labelColor = selected ? "accent" : row.depth === 0 ? "text" : "muted";
+			return `${indent}${this.theme.fg(markerColor, marker)} ${this.theme.fg(labelColor, normalizeInlineText(row.label))}`;
 		}
 		const indent = "  ".repeat(row.depth);
 		const color = this.categoryColor(row.rootId);
@@ -688,10 +776,17 @@ export class UsageView {
 	}
 
 	/** Percentage text used by the independently aligned rightmost column. */
-	private plainLegendPercent(tokens: number): string {
-		const contextWindow = this.usage.reported?.contextWindow;
-		if (contextWindow === undefined || contextWindow <= 0) return "";
-		return formatPercent(tokens / contextWindow);
+	private plainLegendPercent(row: LegendRow): string {
+		if (row.type === "spacer" || row.type === "section") return "";
+		if (row.type === "accounting") return row.percent ?? "";
+		if (row.type === "buffer" || row.type === "free") {
+			const contextWindow = this.usage.reported?.contextWindow;
+			return contextWindow === undefined || contextWindow <= 0 ? "" : formatPercent(row.tokens / contextWindow);
+		}
+		const denominator = row.depth === 0 ? this.usage.estimatedTokens : row.parentTokens;
+		return denominator === undefined || !Number.isFinite(denominator) || denominator <= 0
+			? ""
+			: formatPercent(row.category.tokens / denominator);
 	}
 
 	/** Colored occupied/partial/buffer/free glyph for one map cell. */
@@ -801,6 +896,41 @@ export class UsageView {
 		const row = this.legendRows[this.navigator.selected];
 		if (row === undefined || row.type !== "category") return;
 		this.previewRow = row;
+		this.cachedPreviewEntries = undefined;
+		this.clearPreviewContent();
+		this.blockNavigator.reset();
+		this.previewScroller.reset();
+		this.clearCache();
+	}
+
+	/** Show exact command/result text only after Enter opens its specific AB verb row. */
+	private openAccountingPreview(row: AccountingLegendRow): void {
+		const detail = row.detail;
+		const executions = detail?.executions;
+		if (detail === undefined || executions === undefined || executions.length === 0) return;
+		const entries = executions.map((execution) => {
+			const details = execution.toolName === "bash"
+				? [`Command (${row.label}):`, execution.command ?? ""]
+				: [`Document (${row.label}):`, `Path: ${execution.path ?? row.label}`];
+			return {
+				timestamp: execution.timestamp,
+				breadcrumb: [execution.toolName],
+				tokens: execution.tokens,
+				text: [
+					...details,
+					`Execution: ${execution.isError ? "error" : "success"}${execution.sharedOutput ? " (shared Bash result)" : ""}`,
+					execution.output || "(no output)",
+				].join("\n"),
+			};
+		});
+		const category: UsageCategory = {
+			id: `source-detail-${row.id}`,
+			label: row.label,
+			tokens: detail.tokens,
+			entries,
+		};
+		this.previewRow = { type: "category", category, depth: 0, rootId: category.id, forceBlockStream: true };
+		this.openBlockIndex = undefined;
 		this.cachedPreviewEntries = undefined;
 		this.clearPreviewContent();
 		this.blockNavigator.reset();
@@ -935,7 +1065,7 @@ export class UsageView {
 	private categoryHeaderLine(row: CategoryLegendRow, width: number): string {
 		const theme = this.theme;
 		const title = theme.fg("accent", theme.bold(normalizeInlineText(row.category.label)));
-		const percent = this.plainLegendPercent(row.category.tokens);
+		const percent = this.plainLegendPercent(row);
 		const meta = theme.fg(
 			"muted",
 			`${formatTokens(row.category.tokens)}${percent === "" ? "" : ` · ${percent}`} `,
@@ -1043,7 +1173,7 @@ export class UsageView {
 	/** The sole category entry or an explicitly opened block; undefined for a block stream. */
 	private getFullContentEntry(row: CategoryLegendRow): UsagePreviewEntry | undefined {
 		const entries = this.previewEntries(row);
-		if (entries.length === 1) return entries[0];
+		if (entries.length === 1 && row.forceBlockStream !== true) return entries[0];
 		return this.openBlockIndex === undefined ? undefined : entries[this.openBlockIndex];
 	}
 
@@ -1164,10 +1294,74 @@ function buildCategoryLegendRows(categories: readonly UsageCategory[]): Category
 		rows.push({ type: "category", category, depth: 0, rootId: category.id });
 		if (category.id !== "tool-output") continue;
 		for (const child of category.children ?? []) {
-			rows.push({ type: "category", category: child, depth: 1, rootId: category.id });
+			rows.push({ type: "category", category: child, depth: 1, rootId: category.id, parentTokens: category.tokens });
 		}
 	}
 	return rows;
+}
+
+/** Show exactly one command/document detail level under the Agent Brain heading. */
+function buildCurrentContextRows(
+	details: readonly SourceAttributionDetail[],
+	expanded: ReadonlySet<string>,
+	contextEstimate: number,
+): (AccountingLegendRow | SectionLegendRow | SectionSpacerLegendRow)[] {
+	const rows: (AccountingLegendRow | SectionLegendRow | SectionSpacerLegendRow)[] = [
+		{ type: "spacer" },
+		{ type: "section", label: "Agent Brain:" },
+	];
+	const commandDetails = details.filter((detail) => detail.group === "commands");
+	const commandTokens = commandDetails.reduce((sum, detail) => sum + detail.tokens, 0);
+	if (commandDetails.length > 0) {
+		const commandsExpanded = expanded.has("ab-commands");
+		rows.push({
+			type: "accounting", id: "ab-commands", depth: 0, label: "Commands",
+			value: `≈${formatTokens(commandTokens)}`, percent: accountingPercent(commandTokens, contextEstimate),
+			expandable: true, expanded: commandsExpanded,
+		});
+		if (commandsExpanded) {
+			rows.push(...commandDetails.map((detail, index) => ({
+				type: "accounting" as const,
+				id: `ab-command-${index}`,
+				depth: 1,
+				label: detail.label,
+				value: `≈${formatTokens(detail.tokens)}`,
+				percent: accountingPercent(detail.tokens, contextEstimate),
+				previewable: (detail.executions?.length ?? 0) > 0,
+				detail,
+			})));
+		}
+	}
+
+	const documentDetails = details.filter((detail) => detail.group === "skills-docs");
+	const documentTokens = documentDetails.reduce((sum, detail) => sum + detail.tokens, 0);
+	if (documentDetails.length > 0) {
+		const docsExpanded = expanded.has("ab-docs");
+		rows.push({
+			type: "accounting", id: "ab-docs", depth: 0, label: "Docs",
+			value: `≈${formatTokens(documentTokens)}`, percent: accountingPercent(documentTokens, contextEstimate),
+			expandable: true, expanded: docsExpanded,
+		});
+		if (docsExpanded) {
+			rows.push(...documentDetails.map((detail, index) => ({
+				type: "accounting" as const,
+				id: `ab-doc-detail-${index}`,
+				depth: 1,
+				label: detail.label,
+				value: `≈${formatTokens(detail.tokens)}`,
+				percent: accountingPercent(detail.tokens, contextEstimate),
+				previewable: (detail.executions?.length ?? 0) > 0,
+				detail,
+			})));
+		}
+	}
+	return rows;
+}
+
+function accountingPercent(tokens: number, contextEstimate: number): string | undefined {
+	return Number.isFinite(contextEstimate) && contextEstimate > 0
+		? formatPercent(tokens / contextEstimate)
+		: undefined;
 }
 
 /**
@@ -1243,7 +1437,7 @@ function categoryMarker(categoryId: string, depth: number): string {
 }
 
 /** Token estimate carried by category, buffer, or free-space legend rows. */
-function legendTokens(row: LegendRow): number {
+function legendTokens(row: CategoryLegendRow | BufferLegendRow | FreeLegendRow): number {
 	return row.type === "category" ? row.category.tokens : row.tokens;
 }
 

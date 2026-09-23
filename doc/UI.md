@@ -15,7 +15,7 @@ touches:
 | [ui/previews.md](ui/previews.md) | Labeled parts, restored extension lines, marker legend, repeated headings, marked JSON |
 | [ui/usage.md](ui/usage.md) | Context Usage: header, notices, map, map scale, legend, category preview |
 | [ui/injections.md](ui/injections.md) | Context Injections: contribution tree, injection preview |
-| [ui/history.md](ui/history.md) | Context History and Failures: cumulative accounting, estimates, and source rows |
+| [ui/history.md](ui/history.md) | Context History and Failures: full-session cumulative accounting, estimates, and source rows |
 
 Constants are named where a rule needs a number; the module owning the constant
 is authoritative.
@@ -128,7 +128,10 @@ would otherwise hide theirs permanently.
 The Injections view has list and raw-preview states. The Usage view has a
 category legend and opens a single-entry category directly as full content.
 Multi-entry categories have a block stream with a full-content level for capped
-blocks; empty categories keep their explicit no-content state.
+blocks; empty categories keep their explicit no-content state. `Agent Brain:`
+has a standalone peer-level section heading like `Category:` and `Map:`; only
+latest-request attribution for Agent Brain commands and docs appears beneath it.
+It does not show cumulative provider totals or general failure/retry counts.
 
 - Up/Down and vim-style `k`/`j` navigate selectable rows or blocks and scroll
   full-content previews. Hints render the pair as one `↑↓/jk` label
@@ -137,8 +140,9 @@ blocks; empty categories keep their explicit no-content state.
   or last page of a Usage block stream, another page key selects the first or
   last block.
 - Home/End jump to boundaries.
-- Enter opens the selected row's preview; in a Usage block stream it opens full
-  content only when the selected block is capped.
+- Enter opens a selected Usage category preview, expands/collapses a Usage
+  group, or opens a selected AB command `[bash]` / Docs `[read]` block preview.
+  In a block stream, Enter opens full content only when the selected block is capped.
 - Escape returns one level while preserving selection, then closes the view.
 - Views may add keys; Usage adds `z` for the map scale.
 

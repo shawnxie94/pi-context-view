@@ -147,3 +147,18 @@ test("ListNavigator skips non-selectable trailing rows while scrolling them into
 	assert.equal(navigator.offset, 4);
 	assert.equal(navigator.moveBy(1), false);
 });
+
+test("ListNavigator skips non-selectable section rows", () => {
+	const navigator = new ListNavigator(8, 3, [0, 1, 4, 6]);
+
+	assert.equal(navigator.moveBy(1), true);
+	assert.equal(navigator.selected, 1);
+	assert.equal(navigator.moveBy(1), true);
+	assert.equal(navigator.selected, 4);
+	assert.equal(navigator.selectedOrdinal, 2);
+	assert.equal(navigator.moveTo(2), false);
+	assert.equal(navigator.selected, 4);
+	assert.equal(navigator.moveTo(7), true);
+	assert.equal(navigator.selected, 6);
+	assert.equal(navigator.moveBy(1), false);
+});

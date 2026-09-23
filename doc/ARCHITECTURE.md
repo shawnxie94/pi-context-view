@@ -9,9 +9,9 @@ extension can read, and how that data reaches the views.
 | View       | What it shows                                                                           | When its data changes                                     |
 | ---------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------- |
 | Injections | The captured system prompt, tools, and injected messages.                               | Never after Initial is captured.                          |
-| Usage      | Replayed branch prompt/tools and session messages, plus Initial's request-only changes. | Rebuilt when the view opens; Initial changes stay frozen. |
-| History    | Per-session provider usage, context category estimates, and selected tool-source counts. | Appended after each completed or unpaired model request.  |
-| Failures   | Explicit tool errors, immediate retries, and their token estimates by source.             | Appended when a hard tool error or retry is observed.     |
+| Usage      | Replayed branch prompt/tools and session messages, plus Initial's request-only changes; live composition shares and latest-request attribution for Agent Brain sources only. | Rebuilt when the view opens; Initial changes stay frozen. |
+| History    | Full-session cumulative provider usage, context category estimates, and selected tool-source counts. | Appended after each completed or unpaired model request.  |
+| Failures   | Full-session explicit tool errors, immediate retries, and their token estimates by source.             | Appended when a hard tool error or retry is observed.     |
 
 **Initial** is a frozen snapshot of the system prompt, active tools, and injected messages at the first
 capture after this extension loads. There are two ways to capture it:
@@ -417,8 +417,13 @@ describes one past run. Initial continues to read the effective prompt rather
 than replacing it with replay.
 
 The UI receives `ctx.getContextUsage()` separately. Its reported total is not
-used to force category estimates to match. Map rendering rules belong to
-[ui/usage.md](ui/usage.md#context-map).
+used to force category estimates to match. In the Usage legend, top-level
+category shares divide by the live `estimatedTokens` total (the sum of top-level
+categories); nested shares divide by their parent. Context-window occupancy in
+the header/map is a different measure. The peer `Agent Brain:` section shows
+only latest-request attribution for Agent Brain commands and skill/document
+reads; it does not show cumulative provider usage or generation-wide
+failure/retry estimates. Map rendering rules belong to [ui/usage.md](ui/usage.md#context-map).
 
 ### Known Limitation: Replacements and Removals
 
@@ -605,6 +610,13 @@ persist probe content in these records.
   later agent runs.
 - Older pi does not emit the failure event. A failed compaction keeps this
   extension in fallback mode until the session ends.
+
+On successful `session_compact`, clear in-memory pending-request and retry
+matching state. `session_compact_failed` does not clear either state. For Usage
+accounting, read only `SessionManager.getBranch()` and begin the current
+generation after its latest `CompactionEntry`; do not scan all session entries
+to derive current-context shares. `/context history` and `/context failures`
+continue reading the full session.
 
 While compaction is active, return the fallback without starting or consuming
 the probe attempt.
@@ -846,13 +858,27 @@ categories. Raw prompts, message bodies, tool arguments, paths, outputs, errors,
 fingerprints are never persisted; retry fingerprints exist only in memory until the next tool
 call or session reset.
 
-Provider usage comes only from assistant messages' Pi-reported usage values. Context category and
-source attribution values use the existing character-based estimate and are cumulative per Pi
-session; source attribution is a subset/overlay and must not be added to category totals. A hard
-tool failure estimate counts transient tool-call argument and error-result text lengths. A retry
-estimate counts the repeated call input only. These estimates can overlap provider-reported usage
-and each other, are not proof of avoidable waste, and must always be labeled as estimates. Only
-`isError` tool results are treated as failures; semantic failures are intentionally not inferred.
+Live category shares in Usage use the current `ContextUsageSnapshot.estimatedTokens` total. The
+`Agent Brain:` section shows two latest-request groups: `Commands` and `Docs`. Commands expand
+directly into one row per AB invocation, labeled by safe CLI domain/verb; do not add a separate
+domain row or merge repeated or compound commands. Docs expand into skill and Agent Brain
+document reads. Enter on a command row opens a timestamped `[bash]` block preview; Enter on a
+Docs row opens timestamped `[read]` block(s). Both start capped and reveal full content when Enter
+is pressed on a truncated block. Each row carries an allocated share of tool-call arguments and
+returned text, estimated by character length (roughly chars/4); child estimates sum exactly to
+the group total and reconcile with the corresponding aggregate attribution, though rounded `≈`
+labels can visually differ slightly. The dashboard shows only safe labels and estimates. Details
+are derived in memory from messages included in the latest request; only aggregate counters are
+persisted. Raw command arguments, absolute paths, and file contents are never persisted by this
+view. Unrelated tools, temporary
+documents, cumulative provider usage, and generation-wide failure/retry totals are excluded.
+Full-session provider actuals remain in `/context history`; `/context failures` remains the
+full-session failure/retry view. A hard tool failure estimate counts transient tool-call argument and
+error-result text lengths. A retry estimate counts the repeated call input only. These estimates
+can overlap provider-reported usage and each other, are not proof of avoidable waste, and must
+always be labeled as estimates; never clamp overlap ratios, which may exceed 100% of the live
+estimate. Only `isError` tool results are treated as failures; semantic failures are
+intentionally not inferred.
 
 The persisted custom type `pi-context-view:history` is a versioned Pi-session interface, not an
 agent-brain SQLite integration. It has no `run_id` association; any future agent-brain run linkage

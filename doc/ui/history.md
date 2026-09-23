@@ -1,29 +1,37 @@
 # Context History and Failures
 
 `/context history` and `/context failures` are separate fullscreen accounting
-views. Both read only the current Pi session's versioned history custom entries;
-opening either view must not resolve Initial, run the silent probe, or request a
-model response.
+views over the full current Pi session. Both read all versioned history custom
+entries, including records from before compaction; they are intentionally not
+scoped to the active context generation. Opening either view must not resolve
+Initial, run the silent probe, or request a model response.
 
 ## Context History
 
 Show four distinct groups:
 
 1. Request count, with requests missing provider usage called out as unknown.
-2. Provider-reported input, cache-read, cache-write, output, and total tokens.
-3. Cumulative estimated context categories, labeled with `≈`.
-4. Tool-source attribution overlays, labeled as estimates and explained as
-   subsets that overlap the category estimates.
+2. Provider-reported input, cache-read, cache-write, and output tokens; the
+   displayed `Input + Output Total` adds only input and output, excluding the
+   separate cache counters.
+3. Full-session cumulative estimated context categories, labeled with `≈`.
+4. Full-session tool-source attribution overlays, labeled as estimates and
+   explained as subsets that overlap the category estimates. Usage instead
+   shows only the latest request's source attribution after the current
+   compaction boundary.
 
-Provider usage and character-based estimates are separate accounting bases;
-never combine them into a single total. Source attribution includes only
+Provider input/output usage and character-based estimates are separate
+accounting bases; never combine them into a single total. Cache read/write are
+shown separately from the input/output total. Source attribution includes only
 recognized agent-brain command calls and selected document reads, and is an
 estimated subset of request context.
 
 ## Context Failures
 
-Show hard tool failure count, immediate same-input retry count, estimated
-failure request/result footprint, and estimated retry-call input footprint.
+Show full-session hard tool failure count, immediate same-input retry count,
+estimated failure request/result footprint, and estimated retry-call input
+footprint. Usage shows only the current compaction generation's failure and
+retry summaries.
 Where present, show token estimates by tool source. Explain that estimates may
 overlap provider usage and do not prove avoidable waste. Only explicit `isError`
 tool results count as failures; semantic failures are not inferred.

@@ -18,14 +18,17 @@ injected by other extensions.
 
 ## Features
 
-- **Context usage map** - visualize used and free context space, grouped by
-  category (tools, skills, messages, and more).
+- **Context usage map** - visualize used and free context space. The Usage
+  breakdown shows each live top-level category's share of the estimated current
+  context; nested rows divide by their parent. Window occupancy stays separate.
 
 - **Context injections** - explore the hidden parts of the context: the
   system prompt, tool definitions, and extension injections.
-- **Session history and failures** - inspect cumulative provider-reported usage,
-  estimated context categories, tool-source attribution, hard failures, and
-  immediate same-input retries. Estimates are kept separate from provider usage.
+- **Session history and failures** - inspect full-session cumulative
+  provider-reported usage, estimated context categories, tool-source attribution,
+  hard failures, and immediate same-input retries. In Usage, the `Agent Brain:`
+  section is limited to latest-request attribution for Agent Brain commands and
+  docs; it omits cumulative provider totals and generation-wide failures.
 
 ## Commands
 
@@ -105,10 +108,15 @@ You can configure the number of rows and columns in the `Context Usage` map:
 
 ## Accounting and Privacy
 
-`/context history` keeps provider-reported token usage separate from the
-extension's context estimates. `/context failures` reports explicitly flagged
-tool errors and immediately repeated calls with identical tool inputs; those
-costs are estimates and may overlap provider totals.
+`/context usage` uses the live estimated current-context total as the
+composition denominator. Its `Agent Brain:` section shows only the latest
+request's estimated attribution for `ab-command` calls and `agent-brain-docs`
+reads; generic tools and temporary documents are excluded. These text-length
+estimates are marked `≈` and may overlap category estimates. Cumulative
+provider-reported usage and generation-wide failure/retry totals are not shown
+in this section. `/context history` and `/context failures` remain full-session
+cumulative archives. Failures are explicitly flagged tool errors and immediately
+repeated calls with identical tool inputs.
 
 History is stored as Pi session custom entries containing only timestamps,
 model labels, token counters, and source categories. Prompt text, tool inputs,

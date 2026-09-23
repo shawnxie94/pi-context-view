@@ -98,32 +98,38 @@ export function buildInjectionRows(snapshot: InitialSnapshot): InjectionRow[] {
 }
 
 /**
- * Selection and scroll-window state over fixed rows. A trailing summary can
- * participate in scrolling without being included in selection navigation.
+ * Selection and scroll-window state over fixed rows. Sparse selectable indices
+ * let headings and summaries scroll without taking part in selection navigation.
  */
 export class ListNavigator {
 	private readonly rowCount: number;
-	private readonly selectableRowCount: number;
+	private readonly selectableRowIndices: readonly number[];
 	private visibleCount: number;
-	private selectedIndex = 0;
+	private selectedOrdinalValue = 0;
 	private scrollOffset = 0;
 
-	public constructor(rowCount: number, visibleCount: number, selectableRowCount = rowCount) {
+	public constructor(
+		rowCount: number,
+		visibleCount: number,
+		selectableRows: number | readonly number[] = rowCount,
+	) {
 		this.rowCount = Math.max(0, rowCount);
-		this.selectableRowCount = Math.min(this.rowCount, Math.max(0, selectableRowCount));
+		this.selectableRowIndices = typeof selectableRows === "number"
+			? Array.from({ length: Math.min(this.rowCount, Math.max(0, selectableRows)) }, (_, index) => index)
+			: [...new Set(selectableRows.filter((index) => Number.isInteger(index) && index >= 0 && index < this.rowCount))].sort((a, b) => a - b);
 		this.visibleCount = Math.max(1, visibleCount);
 	}
 
 	public get selected(): number {
-		return this.selectedIndex;
+		return this.selectableRowIndices[this.selectedOrdinalValue] ?? 0;
 	}
 
 	public get selectedOrdinal(): number {
-		return this.selectedIndex;
+		return this.selectedOrdinalValue;
 	}
 
 	public get selectableCount(): number {
-		return this.selectableRowCount;
+		return this.selectableRowIndices.length;
 	}
 
 	public get offset(): number {
@@ -149,32 +155,39 @@ export class ListNavigator {
 	}
 
 	public moveBy(delta: number): boolean {
-		return this.moveTo(this.selectedIndex + delta);
+		return this.moveToOrdinal(this.selectedOrdinalValue + delta);
 	}
 
 	public moveTo(index: number): boolean {
-		if (this.selectableRowCount === 0) return false;
-		const next = Math.min(this.selectableRowCount - 1, Math.max(0, index));
-		if (next === this.selectedIndex) return false;
-		this.selectedIndex = next;
-		this.ensureVisible();
-		return true;
+		if (this.selectableRowIndices.length === 0) return false;
+		const nextOrdinal = this.selectableRowIndices.findIndex((rowIndex) => rowIndex >= index);
+		return this.moveToOrdinal(nextOrdinal < 0 ? this.selectableRowIndices.length - 1 : nextOrdinal);
 	}
 
 	public page(direction: -1 | 1): boolean {
 		return this.moveBy(direction * Math.max(1, this.visibleCount - 1));
 	}
 
+	private moveToOrdinal(ordinal: number): boolean {
+		if (this.selectableRowIndices.length === 0) return false;
+		const next = Math.min(this.selectableRowIndices.length - 1, Math.max(0, ordinal));
+		if (next === this.selectedOrdinalValue) return false;
+		this.selectedOrdinalValue = next;
+		this.ensureVisible();
+		return true;
+	}
+
 	private ensureVisible(): void {
+		const selectedIndex = this.selected;
 		const maxOffset = Math.max(0, this.rowCount - this.visibleCount);
-		if (this.selectedIndex < this.scrollOffset) {
-			this.scrollOffset = this.selectedIndex;
-		} else if (this.selectedIndex >= this.scrollOffset + this.visibleCount) {
-			this.scrollOffset = this.selectedIndex - this.visibleCount + 1;
+		if (selectedIndex < this.scrollOffset) {
+			this.scrollOffset = selectedIndex;
+		} else if (selectedIndex >= this.scrollOffset + this.visibleCount) {
+			this.scrollOffset = selectedIndex - this.visibleCount + 1;
 		}
 
-		const trailingRows = this.rowCount - this.selectedIndex - 1;
-		if (this.selectedIndex === this.selectableRowCount - 1 && trailingRows < this.visibleCount) {
+		const trailingRows = this.rowCount - selectedIndex - 1;
+		if (this.selectedOrdinalValue === this.selectableRowIndices.length - 1 && trailingRows < this.visibleCount) {
 			this.scrollOffset = maxOffset;
 		}
 		this.scrollOffset = Math.min(maxOffset, Math.max(0, this.scrollOffset));

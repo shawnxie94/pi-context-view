@@ -9,6 +9,23 @@ const MAX_PERSISTED_RECORDS = 10_000;
 const RETRY_WINDOW_MS = 5 * 60 * 1000;
 
 export type SourceTotals = Record<string, number>;
+export interface SourceAttributionExecution {
+	readonly toolName: "bash" | "read";
+	readonly command?: string;
+	readonly path?: string;
+	readonly output: string;
+	readonly isError: boolean;
+	readonly timestamp: number;
+	readonly tokens: number;
+	readonly sharedOutput?: boolean;
+}
+
+export interface SourceAttributionDetail {
+	readonly group: "commands" | "skills-docs";
+	readonly label: string;
+	readonly tokens: number;
+	readonly executions?: readonly SourceAttributionExecution[];
+}
 type ContextMessage = ContextEvent["messages"][number];
 
 export interface ProviderUsageRecord {
@@ -48,7 +65,7 @@ export interface HistorySummary {
 	readonly outputTokens: number;
 	readonly cacheReadTokens: number;
 	readonly cacheWriteTokens: number;
-	readonly providerTotalTokens: number;
+	readonly providerInputOutputTokens: number;
 	readonly estimatedCategories: SourceTotals;
 	readonly attributedSources: SourceTotals;
 	readonly failedCalls: number;
@@ -57,6 +74,11 @@ export interface HistorySummary {
 	readonly estimatedRetryTokens: number;
 	readonly failureSources: SourceTotals;
 	readonly retrySources: SourceTotals;
+}
+
+export interface CurrentContextSummary extends HistorySummary {
+	/** Latest request's source attribution, not a sum across the compacted generation. */
+	readonly latestRequest?: RequestRecord;
 }
 
 export interface PendingRequest {
@@ -84,6 +106,16 @@ export function readHistoryRecords(entries: readonly unknown[]): HistoryRecord[]
 		}
 	}
 	return records.slice(-MAX_PERSISTED_RECORDS);
+}
+
+/** Keep only current-generation metadata after the latest compaction in the active branch. */
+export function readCurrentContextRecords(branch: readonly unknown[]): HistoryRecord[] {
+	let latestCompaction = -1;
+	for (let index = 0; index < branch.length; index++) {
+		const entry = branch[index];
+		if (isRecord(entry) && entry.type === "compaction") latestCompaction = index;
+	}
+	return readHistoryRecords(branch.slice(latestCompaction + 1));
 }
 
 export function parseHistoryRecord(value: unknown): HistoryRecord | undefined {
@@ -126,7 +158,7 @@ export function summarizeHistory(records: readonly HistoryRecord[]): HistorySumm
 	let outputTokens = 0;
 	let cacheReadTokens = 0;
 	let cacheWriteTokens = 0;
-	let providerTotalTokens = 0;
+	let providerInputOutputTokens = 0;
 	let failedCalls = 0;
 	let retries = 0;
 	let estimatedFailureTokens = 0;
@@ -142,7 +174,7 @@ export function summarizeHistory(records: readonly HistoryRecord[]): HistorySumm
 				outputTokens += record.usage.output;
 				cacheReadTokens += record.usage.cacheRead;
 				cacheWriteTokens += record.usage.cacheWrite;
-				providerTotalTokens += record.usage.totalTokens;
+				providerInputOutputTokens += record.usage.input + record.usage.output;
 			}
 			addTotals(estimatedCategories, record.estimatedCategories);
 			addTotals(attributedSources, record.attributedSources);
@@ -164,7 +196,7 @@ export function summarizeHistory(records: readonly HistoryRecord[]): HistorySumm
 		outputTokens,
 		cacheReadTokens,
 		cacheWriteTokens,
-		providerTotalTokens,
+		providerInputOutputTokens,
 		estimatedCategories,
 		attributedSources,
 		failedCalls,
@@ -174,6 +206,15 @@ export function summarizeHistory(records: readonly HistoryRecord[]): HistorySumm
 		failureSources,
 		retrySources,
 	};
+}
+
+/** Summarize one current compaction generation and retain its latest request view. */
+export function summarizeCurrentContext(records: readonly HistoryRecord[]): CurrentContextSummary {
+	let latestRequest: RequestRecord | undefined;
+	for (const record of records) {
+		if (record.kind === "request") latestRequest = record;
+	}
+	return { ...summarizeHistory(records), ...(latestRequest === undefined ? {} : { latestRequest }) };
 }
 
 /** Classify one tool call without retaining its command, path, arguments, or output. */
@@ -270,9 +311,30 @@ function firstShellExecutable(command: string): string | undefined {
 }
 
 function isAgentBrainReference(path: string): boolean {
+	return agentBrainReferenceLabel(path) !== undefined;
+}
+
+/** Keep only a useful repo-relative identity; never surface an absolute or arbitrary path. */
+function agentBrainReferenceLabel(path: string): string | undefined {
 	const normalized = path.replace(/\\/g, "/");
-	return /(?:^|\/)(?:skills\/agent-brain(?:\/|$)|attach\/protocols(?:\/|$)|\.agent\/protocols(?:\/|$)|playbooks(?:\/|$))/.test(normalized)
-		|| /(?:^|\/)agent-brain\/[^/]*AGENTS(?:\.override)?\.md$/i.test(normalized);
+	const patterns = [
+		/(?:^|\/)(skills\/[^/]+\/.+)$/i,
+		/(?:^|\/)(\.agent\/(?:protocols|project-profile)\/.+)$/i,
+		/(?:^|\/)(attach\/(?:protocols|project-profiles)\/.+)$/i,
+		/(?:^|\/)(playbooks\/.+)$/i,
+		/(?:^|\/)(agent-brain\/.+)$/i,
+	];
+	for (const pattern of patterns) {
+		const match = normalized.match(pattern);
+		if (match?.[1] !== undefined) {
+			const segments = match[1].split("/");
+			const relativeLabel = segments[0] === "skills"
+				? `${segments[1]}/${segments.at(-1)}`
+				: segments.slice(-2).join("/");
+			return relativeLabel.replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").slice(0, 64);
+		}
+	}
+	return undefined;
 }
 
 function isTemporaryPath(path: string): boolean {
@@ -281,7 +343,7 @@ function isTemporaryPath(path: string): boolean {
 		|| /\.(?:tmp|temp|scratch)(?:\.|$)/i.test(normalized);
 }
 
-/** Derive source overlays from messages already present in the model request. */
+/** Derive aggregate source overlays from messages already present in the model request. */
 export function attributeVisibleSources(messages: readonly ContextMessage[]): SourceTotals {
 	const toolSources = new Map<string, string>();
 	const totals: SourceTotals = {};
@@ -304,6 +366,153 @@ export function attributeVisibleSources(messages: readonly ContextMessage[]): So
 		}
 	}
 	return totals;
+}
+
+/** Derive one row per AB command invocation plus transient document totals for the latest request. */
+export function attributeVisibleSourceDetails(
+	messages: readonly ContextMessage[],
+	throughTimestamp: number,
+): SourceAttributionDetail[] {
+	type MutableExecution = {
+		toolName: "bash" | "read";
+		command?: string;
+		path?: string;
+		output: string;
+		isError: boolean;
+		timestamp: number;
+		tokens: number;
+		sharedOutput?: boolean;
+	};
+	type MutableDetail = {
+		group: SourceAttributionDetail["group"];
+		label: string;
+		tokens: number;
+		executions?: MutableExecution[];
+	};
+	type CallDetails = {
+		readonly commandRows?: readonly { readonly detail: MutableDetail; readonly execution: MutableExecution }[];
+		readonly commandWeights?: readonly number[];
+		readonly document?: MutableDetail;
+		readonly documentExecution?: MutableExecution;
+	};
+	const calls = new Map<string, CallDetails>();
+	const commandRows: MutableDetail[] = [];
+	const documents = new Map<string, MutableDetail>();
+
+	for (const message of messages) {
+		if (message.timestamp > throughTimestamp) continue;
+		if (message.role === "assistant") {
+			for (const block of message.content) {
+				if (block.type !== "toolCall") continue;
+				const source = classifyToolSource(block.name, block.arguments);
+				if (source === "ab-command" && typeof block.arguments.command === "string") {
+					const descriptors = abCommandSegments(block.arguments.command);
+					if (descriptors.length === 0) continue;
+					const weights = descriptors.map(({ command }) => Math.max(1, command.length));
+					const inputShares = distributeTokens(textTokens(JSON.stringify(block.arguments)), weights);
+					const rows = descriptors.map((descriptor, index) => {
+						const tokens = inputShares[index] ?? 0;
+						const execution: MutableExecution = {
+							toolName: "bash",
+							command: block.arguments.command as string,
+							output: "",
+							isError: false,
+							timestamp: message.timestamp,
+							tokens,
+							...(descriptors.length > 1 ? { sharedOutput: true } : {}),
+						};
+						const detail: MutableDetail = { group: "commands", label: descriptor.label, tokens, executions: [execution] };
+						commandRows.push(detail);
+						return { detail, execution };
+					});
+					calls.set(block.id, { commandRows: rows, commandWeights: weights });
+					continue;
+				}
+
+				const identity = sourceAttributionIdentity(source, block.arguments);
+				if (identity === undefined) continue;
+				const key = identity.label;
+				const detail = documents.get(key) ?? { ...identity, tokens: 0 };
+				const inputTokens = textTokens(JSON.stringify(block.arguments));
+				detail.tokens += inputTokens;
+				detail.executions ??= [];
+				const execution: MutableExecution = {
+					toolName: "read",
+					path: typeof block.arguments.path === "string" ? block.arguments.path : undefined,
+					output: "",
+					isError: false,
+					timestamp: message.timestamp,
+					tokens: inputTokens,
+				};
+				detail.executions.push(execution);
+				documents.set(key, detail);
+				calls.set(block.id, { document: detail, documentExecution: execution });
+			}
+		} else if (message.role === "toolResult") {
+			const call = calls.get(message.toolCallId);
+			if (call === undefined) continue;
+			const output = message.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
+			const outputTokens = textTokens(output);
+			if (call.document !== undefined) {
+				call.document.tokens += outputTokens;
+				const execution = call.documentExecution;
+				if (execution !== undefined) {
+					execution.output = output;
+					execution.isError = message.isError;
+					execution.tokens += outputTokens;
+				}
+				continue;
+			}
+			const commandRows = call.commandRows ?? [];
+			const outputShares = distributeTokens(outputTokens, call.commandWeights ?? []);
+			for (const [index, row] of commandRows.entries()) {
+				const share = outputShares[index] ?? 0;
+				row.detail.tokens += share;
+				row.execution.tokens += share;
+				row.execution.output = output;
+				row.execution.isError = message.isError;
+			}
+		}
+	}
+	const documentRows = [...documents.values()].sort((left, right) => left.label.localeCompare(right.label));
+	return [...commandRows, ...documentRows];
+}
+
+function sourceAttributionIdentity(
+	source: string,
+	input: Record<string, unknown>,
+): { readonly group: SourceAttributionDetail["group"]; readonly label: string } | undefined {
+	if (source === "agent-brain-docs") {
+		const label = typeof input.path === "string" ? agentBrainReferenceLabel(input.path) : undefined;
+		if (label !== undefined) return { group: "skills-docs", label };
+	}
+	return undefined;
+}
+
+/** Divide one call's estimate across distinct AB command segments without double-counting output. */
+function distributeTokens(tokens: number, weights: readonly number[]): number[] {
+	if (weights.length === 0) return [];
+	const totalWeight = weights.reduce((sum, weight) => sum + Math.max(1, weight), 0);
+	let distributed = 0;
+	return weights.map((weight, index) => {
+		if (index === weights.length - 1) return tokens - distributed;
+		const share = Math.floor(tokens * Math.max(1, weight) / totalWeight);
+		distributed += share;
+		return share;
+	});
+}
+
+/** Return one sanitized dashboard label per AB segment; exact shell text stays in the preview payload. */
+function abCommandSegments(command: string): Array<{ readonly command: string; readonly label: string }> {
+	return splitShellCommands(command).flatMap((segment) => {
+		const executable = firstShellExecutable(segment);
+		const basename = executable?.replace(/\\/g, "/").split("/").pop()?.toLowerCase();
+		if (basename !== "ab" && basename !== "agent-brain") return [];
+		const prefix = segment.slice(Math.max(0, segment.indexOf(executable!) + executable!.length));
+		const match = prefix.match(/\b(task|project|artifact|roadmap|experience|ops)\s+([a-z][a-z-]*)/i);
+		const label = match === null ? "ab command" : `ab ${match[1]!.toLowerCase()} ${match[2]!.toLowerCase()}`;
+		return [{ command: segment.trim(), label }];
+	});
 }
 
 /** Classify and persist only counters for provider requests; all source text stays transient. */

@@ -23,7 +23,7 @@ function summary(): HistorySummary {
 		outputTokens: 30,
 		cacheReadTokens: 20,
 		cacheWriteTokens: 5,
-		providerTotalTokens: 130,
+		providerInputOutputTokens: 130,
 		estimatedCategories: { skills: 240, "tool-output": 80 },
 		attributedSources: { "ab-command-input": 12 },
 		failedCalls: 1,
@@ -42,7 +42,8 @@ test("history view keeps provider usage and estimated source overlays distinct",
 
 	assert.match(text, /Provider-Reported Usage/);
 	assert.match(text, /Estimated Context by Category/);
-	assert.doesNotMatch(text, /Provider Total.*≈/);
+	assert.match(text, /Input \+ Output Total.*130/);
+	assert.doesNotMatch(text, /Input \+ Output Total.*≈/);
 	view.handleInput("\x1b[4~");
 	const endPage = view.render(60).join("\n");
 	assert.match(endPage, /Source Attribution \(Estimated Subsets\)/);

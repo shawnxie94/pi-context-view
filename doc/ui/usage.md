@@ -57,6 +57,47 @@ block at `MAX_NOTICE_LINES` (3) rows; when notices do not fit, keep the rows
 that fit and close with `… +N more`, counting the notices not shown in full.
 They render here rather than through a notification, which the overlay hides.
 
+## Current-context shares and overlapping views
+
+Top-level category percentages use the live `ContextUsageSnapshot.estimatedTokens`
+(sum of the top-level category estimates) as their denominator, so the root
+shares normalize to approximately 100%. A nested row divides by its parent
+category, not by the full context. A missing or zero estimate has no percentage;
+never fabricate a share or render `NaN`. Context-window occupancy in the header,
+map, buffer, and Free Space remains a separate measure.
+
+After the category and window-occupancy rows, show a standalone `Agent Brain:`
+section heading at the same visual level and heading style as `Category:` and
+`Map:`. Keep `Auto-Compact Buffer` and `Free Space` within the Category section,
+even though they describe window occupancy rather than composition shares.
+Leave one empty row above the Agent Brain heading. Beneath it, show two
+independently expandable groups: `Commands` and `Docs`. `Commands` expands
+directly into one row per AB invocation, labeled with its safe CLI domain/verb
+(for example `ab task get`); do not add a separate domain row or merge repeated
+commands or multiple AB commands from one Bash call. `Docs` expands into skill
+and Agent Brain document reads. Exclude unrelated tools and temporary documents,
+and do not show cumulative provider totals or generation-wide failure/retry
+counts here. The section heading itself is not a selectable data row.
+
+Each command or document row carries its allocated share of tool-call arguments
+and returned text, estimated by character length (roughly chars/4) and labeled
+with `≈`. Child estimates sum exactly to their group total and reconcile with the
+corresponding command or docs aggregate attribution; rounded `≈` labels may
+visually differ slightly. On Enter, an AB invocation opens a timestamped `[bash]`
+block preview and a Docs row opens timestamped `[read]` block(s), both initially
+capped like Tool Output. Enter on a capped block reveals its full content.
+Terminal-sanitize previews; raw command arguments, absolute document paths, and
+returned text stay out of dashboard rows and persistent records. Derive these
+details in memory from latest-request messages; persist only existing aggregate
+counters. Percentages divide by the live category estimate when available.
+Attribution may overlap category estimates and is not provider-reported total
+usage.
+
+The expanded groups use the existing Category viewport and scroll counter.
+`/context history` and `/context failures` remain full-session cumulative views;
+compaction scoping applies only to Usage accounting. Session custom entries stay
+metadata-only, and opening any accounting view remains passive.
+
 ## Context map
 
 The overview pairs a proportional map of `DEFAULT_MAP_SIZE` (16 × 16) cells by
@@ -85,8 +126,8 @@ Allocate occupied cells from estimated category totals against the current map
 scale, which is the context window unless [Fit](#map-scale) is active; display
 pi-reported usage separately, because the values may differ.
 
-A dedicated key appears beside the map, below the `Category:` legend and its
-scroll counter, separated by one empty detail row:
+A dedicated key appears beside the map, below the `Category:` and `Agent
+Brain:` sections and their scroll counter, separated by one empty detail row:
 
 ```text
 Map:
@@ -105,7 +146,8 @@ treatment as the header's zoom label while Fit is active, so zooming visibly
 shrinks and highlights it.
 
 The key claims only the rows the complete legend leaves over, counted as the
-detail column minus the `Category:` heading and every legend row:
+detail column minus the `Category:` heading and every legend row, including the
+`Agent Brain:` section heading:
 
 - `MAP_KEY_DETAILED_SPARE_ROWS` (5) or more spare rows: the full key;
 - `MAP_KEY_COMPACT_SPARE_ROWS` (2) to 4: the single-line
@@ -113,8 +155,8 @@ detail column minus the `Category:` heading and every legend row:
   and then shortening `One category` to `One` before the line would truncate;
 - fewer than 2: no key.
 
-Only after the key is gone may the legend hide a category row or start
-scrolling, and the `Category:` heading with at least one legend row always
+Only after the key is gone may the legend hide a category or telemetry row or
+start scrolling, and the `Category:` heading with at least one legend row always
 survives. The dashboard description collapses before the key degrades.
 
 When auto-compaction is enabled, the tail of the map shows the settings
@@ -159,8 +201,9 @@ overrides also color their map cells, legend markers, and Block Size key glyph.
 
 Category names have no trailing colons. Fill the gap before values with `dim`
 dot leaders; shorten or remove leaders before truncating labels or values. Token
-and percentage values align in separate columns, always denominated against the
-true context window regardless of map scale. Categories follow the order pi
+and percentage values align in separate columns. Category shares use the live
+estimated-token total (nested shares use the parent); buffer and Free Space
+percentages continue to use the context window, regardless of map scale. Categories follow the order pi
 assembles them into a request, and both views name them identically:
 
 - System Prompt, Instruction Files, and Skills;
