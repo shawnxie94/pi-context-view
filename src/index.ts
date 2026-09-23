@@ -41,6 +41,7 @@ import {
 	readCurrentContextRecords,
 	readHistoryRecords,
 	RetryTracker,
+	InvocationTracker,
 	summarizeCurrentContext,
 	summarizeHistory,
 	type PendingRequest,
@@ -56,6 +57,7 @@ export default function (pi: ExtensionAPI) {
 	let requestPromptOptions: BeforeAgentStartEvent["systemPromptOptions"] | undefined;
 	const pendingRequests: PendingRequest[] = [];
 	const retryTracker = new RetryTracker();
+	const invocationTracker = new InvocationTracker();
 
 	/** Persist identities (role and timestamp only, never content) not yet written this runtime. */
 	function persistProbeIdentities(): void {
@@ -69,6 +71,7 @@ export default function (pi: ExtensionAPI) {
 		compaction.finish();
 		pendingRequests.length = 0;
 		retryTracker.clear();
+		invocationTracker.clear();
 		// Rehydrate probe identities from all prior runtimes so persisted probe
 		// messages stay out of later model contexts and Usage after resume,
 		// reload, or fork. Restored identities are already persisted.
@@ -89,6 +92,7 @@ export default function (pi: ExtensionAPI) {
 		compaction.finish();
 		pendingRequests.length = 0;
 		retryTracker.clear();
+		invocationTracker.clear();
 	});
 
 	pi.on("session_compact_failed", () => {
@@ -121,7 +125,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("message_end", (event) => {
 		if (event.message.role === "assistant" && !probe.isCurrentRun) {
 			const pending = pendingRequests.shift();
-			if (pending !== undefined) recordRequestCompletion(pi, pending, event.message);
+			if (pending !== undefined) recordRequestCompletion(pi, pending, event.message, invocationTracker.take());
 		}
 		const message = probe.sanitizeMessage(event.message);
 		return message === undefined ? undefined : { message };
@@ -130,17 +134,19 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_end", () => {
 		while (pendingRequests.length > 0) {
 			const pending = pendingRequests.shift();
-			if (pending !== undefined) recordUnpairedRequest(pi, pending);
+			if (pending !== undefined) recordUnpairedRequest(pi, pending, invocationTracker.take());
 		}
 	});
 
 	pi.on("tool_call", (event) => {
+		invocationTracker.noteCall(event);
 		if (retryTracker.noteCall(event.toolName, event.input as Record<string, unknown>)) {
 			recordRetry(pi, event.toolName, event.input as Record<string, unknown>);
 		}
 	});
 
 	pi.on("tool_result", (event) => {
+		invocationTracker.noteResult(event);
 		if (!event.isError) return;
 		retryTracker.noteFailure(event.toolName, event.input, Date.now());
 		recordToolFailure(pi, event);

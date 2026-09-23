@@ -6,11 +6,13 @@ import type { ContextEvent, ExtensionAPI, ToolResultEvent } from "@earendil-work
 import {
 	attributeVisibleSources,
 	attributeVisibleSourceDetails,
+	InvocationTracker,
 	classifyToolSource,
 	isAbCommand,
 	parseHistoryRecord,
 	readCurrentContextRecords,
 	readHistoryRecords,
+	recordRequestCompletion,
 	recordToolFailure,
 	RetryTracker,
 	summarizeCurrentContext,
@@ -46,6 +48,30 @@ test("parseHistoryRecord accepts bounded metadata and rejects raw or malformed d
 	});
 	assert.equal(parseHistoryRecord({ schemaVersion: 1, kind: "request", timestamp: 1, command: "ab task new" }), undefined);
 	assert.equal(parseHistoryRecord({ schemaVersion: 2, kind: "failure", timestamp: 1, source: "ab-command", inputTokens: 2, resultTokens: 4 }), undefined);
+});
+
+test("v2 request records preserve bounded invocation summaries without raw values", () => {
+	const tracker = new InvocationTracker();
+	tracker.noteCall({ toolCallId: "secret-call-id", toolName: "bash", input: { command: "ab task new --goal secret" } }, 100);
+	tracker.noteResult({ toolCallId: "secret-call-id", isError: false }, 150);
+	tracker.noteCall({ toolCallId: "unknown-call", toolName: "read", input: { path: "/private/secret.txt" } }, 200);
+	const invocations = tracker.take();
+	assert.deepEqual(invocations, {
+		summaries: [{ sequence: 1, tool: "ab.task.new", outcome: "success", duration: "instant" }, { sequence: 2, tool: "read", outcome: "unknown", failureClass: "unknown", duration: "unknown" }],
+		omitted: 0,
+		truncated: false,
+	});
+	assert.equal(JSON.stringify(invocations).includes("secret"), false);
+	const mock = mockPi();
+	recordRequestCompletion(mock.pi, { timestamp: 1, model: "p/m", estimatedCategories: {}, attributedSources: {} }, {
+		role: "assistant", provider: "p", model: "m", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 }, content: [], timestamp: 1,
+	} as never, invocations);
+	assert.equal(mock.entries.length, 1);
+	assert.equal(JSON.stringify(mock.entries[0]).includes("secret"), false);
+	assert.deepEqual(parseHistoryRecord({
+		schemaVersion: 2, kind: "request", timestamp: 1, model: "p/m",
+		estimatedCategories: {}, attributedSources: {}, invocations,
+	}), { schemaVersion: 2, kind: "request", timestamp: 1, model: "p/m", estimatedCategories: {}, attributedSources: {}, invocations });
 });
 
 test("summarizeHistory keeps provider totals, estimates, and failure overhead separate", () => {

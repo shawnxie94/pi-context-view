@@ -852,11 +852,13 @@ respectively, before serializing injected-message previews. This includes
 request-only replacements. Do not change the provider-bound message or tool
 arguments, even if an argument has the same name as a signature field.
 
-Persisted probe records contain only role and timestamp identities. History custom entries
-contain only schema version, timestamps, a model label, token counters, and bounded source
-categories. Raw prompts, message bodies, tool arguments, paths, outputs, errors, and retry
-fingerprints are never persisted; retry fingerprints exist only in memory until the next tool
-call or session reset.
+Persisted probe records contain only role and timestamp identities. History custom entries use
+schema v1 for legacy request/failure records and schema v2 for request records that may add a
+bounded ordered invocation summary: sequence, fixed tool/command label, success/error/unknown
+outcome, fixed failure class, and coarse duration bucket. Summaries are capped at 256 per
+request and carry explicit omitted/truncated metadata. Raw prompts, message bodies, tool
+arguments, paths, outputs, errors, call IDs, arbitrary labels, and retry fingerprints are never
+persisted; retry fingerprints exist only in memory until the next tool call or session reset.
 
 Live category shares in Usage use the current `ContextUsageSnapshot.estimatedTokens` total. The
 `Agent Brain:` section shows two latest-request groups: `Commands` and `Docs`. Commands expand
@@ -881,8 +883,9 @@ estimate. Only `isError` tool results are treated as failures; semantic failures
 intentionally not inferred.
 
 The persisted custom type `pi-context-view:history` is a versioned Pi-session interface, not an
-agent-brain SQLite integration. It has no `run_id` association; any future agent-brain run linkage
-must consume a stable metadata contract without reading prompt or tool content.
+agent-brain SQLite integration. It has no `run_id` association; agent-brain consumers receive the
+same durable entry through Pi RPC `entry_appended` and must consume only the normalized summary,
+never a private session file or a second generic observation store.
 
 ## Module Boundaries
 

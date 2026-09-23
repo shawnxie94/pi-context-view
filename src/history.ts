@@ -1,12 +1,40 @@
 import { createHash } from "node:crypto";
-import type { ContextEvent, ExtensionAPI, ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import type { ContextEvent, ExtensionAPI, ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 
 import { textTokens } from "./measure.ts";
 
 export const HISTORY_CUSTOM_TYPE = "pi-context-view:history";
-export const HISTORY_SCHEMA_VERSION = 1;
+export const HISTORY_SCHEMA_VERSION = 2;
+export const LEGACY_HISTORY_SCHEMA_VERSION = 1;
 const MAX_PERSISTED_RECORDS = 10_000;
+export const MAX_INVOCATION_SUMMARIES = 256;
+
+export type InvocationOutcome = "success" | "error" | "unknown";
+export type InvocationFailureClass = "tool-error" | "compound-uncertain" | "unknown";
+export type InvocationDurationBucket = "instant" | "short" | "medium" | "long" | "unknown";
+
+export interface InvocationSummary {
+	readonly sequence: number;
+	readonly tool: string;
+	readonly outcome: InvocationOutcome;
+	readonly failureClass?: InvocationFailureClass;
+	readonly duration?: InvocationDurationBucket;
+}
+
+export interface InvocationCollection {
+	readonly summaries: readonly InvocationSummary[];
+	readonly omitted: number;
+	readonly truncated: boolean;
+}
 const RETRY_WINDOW_MS = 5 * 60 * 1000;
+const ALLOWED_INVOCATION_TOOLS = new Set([
+	"bash", "read", "write", "edit", "grep", "find", "ls", "powershell", "other-tool",
+	"ab.task.new", "ab.task.status", "ab.task.validate", "ab.task.accept", "ab.task.close", "ab.task.finish",
+	"ab.project.attach", "ab.project.detach", "ab.project.scan", "ab.artifact.create", "ab.artifact.get", "ab.artifact.list", "ab.artifact.update",
+	"ab.roadmap.show", "ab.roadmap.add", "ab.roadmap.move", "ab.roadmap.remove", "ab.roadmap.edit", "ab.roadmap.update",
+	"ab.experience.event", "ab.experience.pack", "ab.experience.review", "ab.experience.finalize", "ab.experience.replay",
+	"ab.ops.doctor", "ab.ops.db", "ab.ops.metrics", "ab.ops.batch", "ab.ops.eval", "ab.ops.input", "ab.ops.file", "ab.other",
+]);
 
 export type SourceTotals = Record<string, number>;
 export interface SourceAttributionExecution {
@@ -37,13 +65,14 @@ export interface ProviderUsageRecord {
 }
 
 export interface RequestRecord {
-	readonly schemaVersion: 1;
+	readonly schemaVersion: 1 | 2;
 	readonly kind: "request";
 	readonly timestamp: number;
 	readonly model: string;
 	readonly usage?: ProviderUsageRecord;
 	readonly estimatedCategories: SourceTotals;
 	readonly attributedSources: SourceTotals;
+	readonly invocations?: InvocationCollection;
 }
 
 export interface FailureRecord {
@@ -119,26 +148,29 @@ export function readCurrentContextRecords(branch: readonly unknown[]): HistoryRe
 }
 
 export function parseHistoryRecord(value: unknown): HistoryRecord | undefined {
-	if (!isRecord(value) || value.schemaVersion !== HISTORY_SCHEMA_VERSION || !isFiniteNumber(value.timestamp)) return undefined;
+	if (!isRecord(value) || ![LEGACY_HISTORY_SCHEMA_VERSION, HISTORY_SCHEMA_VERSION].includes(value.schemaVersion as number) || !isFiniteNumber(value.timestamp)) return undefined;
 	if (value.kind === "request") {
 		const estimatedCategories = parseTotals(value.estimatedCategories);
 		const attributedSources = parseTotals(value.attributedSources);
 		if (!estimatedCategories || !attributedSources) return undefined;
 		const usage = parseProviderUsage(value.usage);
+		const invocations = value.schemaVersion === HISTORY_SCHEMA_VERSION ? parseInvocations(value.invocations) : undefined;
+		if (value.schemaVersion === HISTORY_SCHEMA_VERSION && value.invocations !== undefined && invocations === undefined) return undefined;
 		return {
-			schemaVersion: HISTORY_SCHEMA_VERSION,
+			schemaVersion: value.schemaVersion as 1 | 2,
 			kind: "request",
 			timestamp: value.timestamp,
 			model: typeof value.model === "string" ? value.model.slice(0, 160) : "unknown",
 			...(usage === undefined ? {} : { usage }),
 			estimatedCategories,
 			attributedSources,
+			...(invocations === undefined ? {} : { invocations }),
 		};
 	}
 	if (value.kind === "failure" || value.kind === "retry") {
-		if (!isFiniteNumber(value.inputTokens) || !isFiniteNumber(value.resultTokens) || typeof value.source !== "string") return undefined;
+		if (value.schemaVersion !== LEGACY_HISTORY_SCHEMA_VERSION || !isFiniteNumber(value.inputTokens) || !isFiniteNumber(value.resultTokens) || typeof value.source !== "string") return undefined;
 		return {
-			schemaVersion: HISTORY_SCHEMA_VERSION,
+			schemaVersion: LEGACY_HISTORY_SCHEMA_VERSION,
 			kind: value.kind,
 			timestamp: value.timestamp,
 			source: value.source.slice(0, 80),
@@ -520,6 +552,7 @@ export function recordRequestCompletion(
 	pi: ExtensionAPI,
 	pending: PendingRequest,
 	message: Extract<ContextMessage, { role: "assistant" }>,
+	invocations?: InvocationCollection,
 ): RequestRecord {
 	const usage = message.usage;
 	const hasReportedUsage = [usage.input, usage.output, usage.cacheRead, usage.cacheWrite, usage.totalTokens]
@@ -530,11 +563,11 @@ export function recordRequestCompletion(
 		cacheRead: finiteNonnegative(usage.cacheRead),
 		cacheWrite: finiteNonnegative(usage.cacheWrite),
 		totalTokens: finiteNonnegative(usage.totalTokens),
-	} : undefined);
+	} : undefined, invocations);
 }
 
-export function recordUnpairedRequest(pi: ExtensionAPI, pending: PendingRequest): RequestRecord {
-	return persistRequest(pi, pending, pending.model, undefined);
+export function recordUnpairedRequest(pi: ExtensionAPI, pending: PendingRequest, invocations?: InvocationCollection): RequestRecord {
+	return persistRequest(pi, pending, pending.model, undefined, invocations);
 }
 
 export function recordToolFailure(pi: ExtensionAPI, event: ToolResultEvent, timestamp = Date.now()): FailureRecord | undefined {
@@ -542,7 +575,7 @@ export function recordToolFailure(pi: ExtensionAPI, event: ToolResultEvent, time
 	const source = classifyToolSource(event.toolName, event.input);
 	const output = event.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
 	const record: FailureRecord = {
-		schemaVersion: HISTORY_SCHEMA_VERSION,
+		schemaVersion: LEGACY_HISTORY_SCHEMA_VERSION,
 		kind: "failure",
 		timestamp,
 		source,
@@ -555,7 +588,7 @@ export function recordToolFailure(pi: ExtensionAPI, event: ToolResultEvent, time
 
 export function recordRetry(pi: ExtensionAPI, toolName: string, input: Record<string, unknown>, timestamp = Date.now()): FailureRecord {
 	const record: FailureRecord = {
-		schemaVersion: HISTORY_SCHEMA_VERSION,
+		schemaVersion: LEGACY_HISTORY_SCHEMA_VERSION,
 		kind: "retry",
 		timestamp,
 		source: classifyToolSource(toolName, input),
@@ -564,6 +597,64 @@ export function recordRetry(pi: ExtensionAPI, toolName: string, input: Record<st
 	};
 	appendHistoryRecord(pi, record);
 	return record;
+}
+
+type PendingInvocation = {
+	readonly sequence: number;
+	readonly tool: string;
+	readonly startedAt: number;
+	readonly compound: boolean;
+};
+
+/** Collect transient lifecycle summaries; raw inputs, outputs, and ids never leave this object. */
+export class InvocationTracker {
+	private nextSequence = 1;
+	private readonly pending = new Map<string, PendingInvocation>();
+	private readonly completed: InvocationSummary[] = [];
+
+	public noteCall(event: Pick<ToolCallEvent, "toolCallId" | "toolName" | "input">, timestamp = Date.now()): void {
+		const input = event.input as Record<string, unknown>;
+		const command = event.toolName === "bash" && typeof input.command === "string" ? input.command : undefined;
+		this.pending.set(event.toolCallId, {
+			sequence: this.nextSequence++,
+			tool: invocationLabel(event.toolName, input),
+			startedAt: timestamp,
+			compound: command !== undefined && abCommandSegments(command).length > 1,
+		});
+	}
+
+	public noteResult(event: Pick<ToolResultEvent, "toolCallId" | "isError">, timestamp = Date.now()): void {
+		const call = this.pending.get(event.toolCallId);
+		if (call === undefined) return;
+		this.pending.delete(event.toolCallId);
+		const outcome: InvocationOutcome = event.isError ? "error" : "success";
+		this.completed.push({
+			sequence: call.sequence,
+			tool: call.tool,
+			outcome,
+			...(event.isError ? { failureClass: call.compound ? "compound-uncertain" : "tool-error" } : {}),
+			duration: durationBucket(timestamp - call.startedAt),
+		});
+	}
+
+	public take(): InvocationCollection | undefined {
+		for (const call of this.pending.values()) {
+			this.completed.push({ sequence: call.sequence, tool: call.tool, outcome: "unknown", failureClass: "unknown", duration: "unknown" });
+		}
+		this.pending.clear();
+		if (this.completed.length === 0) return undefined;
+		this.completed.sort((left, right) => left.sequence - right.sequence);
+		const omitted = Math.max(0, this.completed.length - MAX_INVOCATION_SUMMARIES);
+		const summaries = this.completed.slice(0, MAX_INVOCATION_SUMMARIES);
+		this.completed.length = 0;
+		this.nextSequence = 1;
+		return { summaries, omitted, truncated: omitted > 0 };
+	}
+
+	public clear(): void {
+		this.pending.clear();
+		this.completed.length = 0;
+	}
 }
 
 export class RetryTracker {
@@ -602,6 +693,7 @@ function persistRequest(
 	pending: PendingRequest,
 	model: string,
 	usage: ProviderUsageRecord | undefined,
+	invocations?: InvocationCollection,
 ): RequestRecord {
 	const record: RequestRecord = {
 		schemaVersion: HISTORY_SCHEMA_VERSION,
@@ -611,9 +703,50 @@ function persistRequest(
 		...(usage === undefined ? {} : { usage }),
 		estimatedCategories: pending.estimatedCategories,
 		attributedSources: pending.attributedSources,
+		...(invocations === undefined ? {} : { invocations }),
 	};
 	appendHistoryRecord(pi, record);
 	return record;
+}
+
+function parseInvocations(value: unknown): InvocationCollection | undefined {
+	if (!isRecord(value) || !Array.isArray(value.summaries) || !isFiniteNumber(value.omitted) || typeof value.truncated !== "boolean") return undefined;
+	const summaries: InvocationSummary[] = [];
+	for (const item of value.summaries.slice(0, MAX_INVOCATION_SUMMARIES)) {
+		if (!isRecord(item) || !Number.isInteger(item.sequence) || item.sequence < 1 || typeof item.tool !== "string" || !ALLOWED_INVOCATION_TOOLS.has(item.tool) || !isInvocationOutcome(item.outcome)) return undefined;
+		if (item.failureClass !== undefined && !isInvocationFailureClass(item.failureClass)) return undefined;
+		if (item.duration !== undefined && !isInvocationDuration(item.duration)) return undefined;
+		summaries.push({ sequence: item.sequence, tool: item.tool, outcome: item.outcome, ...(item.failureClass === undefined ? {} : { failureClass: item.failureClass }), ...(item.duration === undefined ? {} : { duration: item.duration }) });
+	}
+	return { summaries, omitted: Math.floor(value.omitted), truncated: value.truncated };
+}
+
+function isInvocationOutcome(value: unknown): value is InvocationOutcome {
+	return value === "success" || value === "error" || value === "unknown";
+}
+
+function isInvocationFailureClass(value: unknown): value is InvocationFailureClass {
+	return value === "tool-error" || value === "compound-uncertain" || value === "unknown";
+}
+
+function isInvocationDuration(value: unknown): value is InvocationDurationBucket {
+	return value === "instant" || value === "short" || value === "medium" || value === "long" || value === "unknown";
+}
+
+function invocationLabel(toolName: string, input: Record<string, unknown>): string {
+	if (toolName !== "bash" || typeof input.command !== "string") return ALLOWED_INVOCATION_TOOLS.has(toolName) ? toolName : "other-tool";
+	const descriptor = abCommandSegments(input.command)[0]?.label.match(/^ab (task|project|artifact|roadmap|experience|ops) ([a-z-]+)$/i);
+	if (descriptor === undefined || descriptor === null) return "ab.other";
+	const candidate = `ab.${descriptor[1]!.toLowerCase()}.${descriptor[2]!.toLowerCase()}`;
+	return ALLOWED_INVOCATION_TOOLS.has(candidate) ? candidate : "ab.other";
+}
+
+function durationBucket(milliseconds: number): InvocationDurationBucket {
+	if (!Number.isFinite(milliseconds) || milliseconds < 0) return "unknown";
+	if (milliseconds < 100) return "instant";
+	if (milliseconds < 1_000) return "short";
+	if (milliseconds < 10_000) return "medium";
+	return "long";
 }
 
 function parseProviderUsage(value: unknown): ProviderUsageRecord | undefined {
