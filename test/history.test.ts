@@ -55,9 +55,18 @@ test("v2 request records preserve bounded invocation summaries without raw value
 	tracker.noteCall({ toolCallId: "secret-call-id", toolName: "bash", input: { command: "ab task new --goal secret" } }, 100);
 	tracker.noteResult({ toolCallId: "secret-call-id", isError: false }, 150);
 	tracker.noteCall({ toolCallId: "unknown-call", toolName: "read", input: { path: "/private/secret.txt" } }, 200);
+	tracker.noteCall({ toolCallId: "unknown-action", toolName: "bash", input: { command: "ab task mystery --secret value" } }, 300);
+	tracker.noteResult({ toolCallId: "unknown-action", isError: false }, 301);
+	tracker.noteCall({ toolCallId: "help-call", toolName: "bash", input: { command: "ab --help" } }, 400);
+	tracker.noteResult({ toolCallId: "help-call", isError: false }, 401);
 	const invocations = tracker.take();
 	assert.deepEqual(invocations, {
-		summaries: [{ sequence: 1, tool: "ab.task.new", outcome: "success", duration: "instant" }, { sequence: 2, tool: "read", outcome: "unknown", failureClass: "unknown", duration: "unknown" }],
+		summaries: [
+			{ sequence: 1, tool: "ab.task.new", outcome: "success", duration: "instant" },
+			{ sequence: 2, tool: "read", outcome: "unknown", failureClass: "unknown", duration: "unknown" },
+			{ sequence: 3, tool: "ab.task.other", outcome: "success", duration: "instant" },
+			{ sequence: 4, tool: "ab.help", outcome: "success", duration: "instant" },
+		],
 		omitted: 0,
 		truncated: false,
 	});

@@ -29,11 +29,13 @@ export interface InvocationCollection {
 const RETRY_WINDOW_MS = 5 * 60 * 1000;
 const ALLOWED_INVOCATION_TOOLS = new Set([
 	"bash", "read", "write", "edit", "grep", "find", "ls", "powershell", "other-tool",
+	"ab.help", "ab.other",
+	"ab.task.other", "ab.project.other", "ab.artifact.other", "ab.roadmap.other", "ab.experience.other", "ab.ops.other",
 	"ab.task.new", "ab.task.status", "ab.task.validate", "ab.task.accept", "ab.task.close", "ab.task.finish",
 	"ab.project.attach", "ab.project.detach", "ab.project.scan", "ab.artifact.create", "ab.artifact.get", "ab.artifact.list", "ab.artifact.update",
 	"ab.roadmap.show", "ab.roadmap.add", "ab.roadmap.move", "ab.roadmap.remove", "ab.roadmap.edit", "ab.roadmap.update",
 	"ab.experience.event", "ab.experience.pack", "ab.experience.review", "ab.experience.finalize", "ab.experience.replay",
-	"ab.ops.doctor", "ab.ops.db", "ab.ops.metrics", "ab.ops.batch", "ab.ops.eval", "ab.ops.input", "ab.ops.file", "ab.other",
+	"ab.ops.doctor", "ab.ops.db", "ab.ops.metrics", "ab.ops.batch", "ab.ops.eval", "ab.ops.input", "ab.ops.file",
 ]);
 
 export type SourceTotals = Record<string, number>;
@@ -736,9 +738,12 @@ function isInvocationDuration(value: unknown): value is InvocationDurationBucket
 function invocationLabel(toolName: string, input: Record<string, unknown>): string {
 	if (toolName !== "bash" || typeof input.command !== "string") return ALLOWED_INVOCATION_TOOLS.has(toolName) ? toolName : "other-tool";
 	const descriptor = abCommandSegments(input.command)[0]?.label.match(/^ab (task|project|artifact|roadmap|experience|ops) ([a-z-]+)$/i);
-	if (descriptor === undefined || descriptor === null) return "ab.other";
-	const candidate = `ab.${descriptor[1]!.toLowerCase()}.${descriptor[2]!.toLowerCase()}`;
-	return ALLOWED_INVOCATION_TOOLS.has(candidate) ? candidate : "ab.other";
+	if (descriptor === undefined || descriptor === null) {
+		return /(?:^|\s)(?:-h|--help)(?:\s|$)/.test(input.command) ? "ab.help" : "ab.other";
+	}
+	const domain = descriptor[1]!.toLowerCase();
+	const candidate = `ab.${domain}.${descriptor[2]!.toLowerCase()}`;
+	return ALLOWED_INVOCATION_TOOLS.has(candidate) ? candidate : `ab.${domain}.other`;
 }
 
 function durationBucket(milliseconds: number): InvocationDurationBucket {
