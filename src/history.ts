@@ -644,7 +644,7 @@ export class InvocationTracker {
 			this.completed.push({ sequence: call.sequence, tool: call.tool, outcome: "unknown", failureClass: "unknown", duration: "unknown" });
 		}
 		this.pending.clear();
-		if (this.completed.length === 0) return undefined;
+		if (this.completed.length === 0) return { summaries: [], omitted: 0, truncated: false };
 		this.completed.sort((left, right) => left.sequence - right.sequence);
 		const omitted = Math.max(0, this.completed.length - MAX_INVOCATION_SUMMARIES);
 		const summaries = this.completed.slice(0, MAX_INVOCATION_SUMMARIES);

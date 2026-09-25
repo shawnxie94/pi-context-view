@@ -855,8 +855,9 @@ arguments, even if an argument has the same name as a signature field.
 Persisted probe records contain only role and timestamp identities. History custom entries use
 schema v1 for legacy request/failure records and schema v2 for request records that may add a
 bounded ordered invocation summary: sequence, fixed tool/command label, success/error/unknown
-outcome, fixed failure class, and coarse duration bucket. Summaries are capped at 256 per
-request and carry explicit omitted/truncated metadata. Raw prompts, message bodies, tool
+outcome, fixed failure class, and coarse duration bucket. Every persisted request carries an
+invocation collection, including an empty collection when no tool call occurred. Summaries are
+capped at 256 per request and carry explicit omitted/truncated metadata. Raw prompts, message bodies, tool
 arguments, paths, outputs, errors, call IDs, arbitrary labels, and retry fingerprints are never
 persisted; retry fingerprints exist only in memory until the next tool call or session reset.
 

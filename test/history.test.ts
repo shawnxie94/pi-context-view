@@ -50,6 +50,17 @@ test("parseHistoryRecord accepts bounded metadata and rejects raw or malformed d
 	assert.equal(parseHistoryRecord({ schemaVersion: 2, kind: "failure", timestamp: 1, source: "ab-command", inputTokens: 2, resultTokens: 4 }), undefined);
 });
 
+test("zero-tool requests preserve an explicit empty invocation collection", () => {
+	const tracker = new InvocationTracker();
+	const invocations = tracker.take();
+	assert.deepEqual(invocations, { summaries: [], omitted: 0, truncated: false });
+	const mock = mockPi();
+	recordRequestCompletion(mock.pi, { timestamp: 1, model: "p/m", estimatedCategories: {}, attributedSources: {} }, {
+		role: "assistant", provider: "p", model: "m", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 }, content: [], timestamp: 1,
+	} as never, invocations);
+	assert.deepEqual((mock.entries[0]?.data as { records: Array<{ invocations?: unknown }> }).records[0]?.invocations, invocations);
+});
+
 test("v2 request records preserve bounded invocation summaries without raw values", () => {
 	const tracker = new InvocationTracker();
 	tracker.noteCall({ toolCallId: "secret-call-id", toolName: "bash", input: { command: "ab task new --goal secret" } }, 100);
